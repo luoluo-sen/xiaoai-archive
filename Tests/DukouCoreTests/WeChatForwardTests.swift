@@ -1,0 +1,654 @@
+import DukouCore
+import Foundation
+import XCTest
+
+final class WeChatForwardTests: XCTestCase {
+    private func date(_ value: String) -> Date {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
+        return formatter.date(from: value)!
+    }
+    private func records(_ rows: [(String, String)]) throws -> [WeChatTranscriptRecord] {
+        try WeChatTranscriptRecord.parse(rows.map { "·甲\n\($0.0)\n\($0.1)\n" }.joined(separator: "\n"))
+    }
+
+    func testNativeTimeBoundaryPreservesDuplicatesAndRollingDays() throws {
+        let end = date("2026-09-05 08:05:48")
+        let hours = WeChatForwardRange(unit: .hours, value: 1)
+        XCTAssertEqual(hours.start(at: end), date("2026-09-05 07:05:00"))
+        XCTAssertEqual(WeChatForwardRange(unit: .days, value: 1).start(at: end), date("2026-09-04 08:05:00"))
+        let rows = try records([("2026年9月5日 07:04", "older"), ("2026年9月5日 07:05", "same"), ("2026年9月5日 07:05", "same"), ("2026年9月5日 08:05", "last")])
+        XCTAssertEqual(try hours.excludedPrefix(in: rows, at: end), 1)
+        XCTAssertEqual(Array(rows.dropFirst()).filter { $0.text == "same" }.count, 2)
+        XCTAssertEqual(try WeChatForwardRange(unit: .days, value: 1).excludedPrefix(in: rows, at: end), 0)
+        XCTAssertThrowsError(try hours.excludedPrefix(in: rows.reversed(), at: end))
+        XCTAssertThrowsError(try hours.excludedPrefix(in: records([("2026年9月5日 08:06", "future")]), at: end))
+        XCTAssertEqual(try hours.excludedPrefix(in: records([("2026年9月5日 07:04", "all older")]), at: end), 1)
+    }
+
+    func testCountRangeValidation() {
+        for count in [1, 2000, 2001, 1_000_000, Int.max] {
+            let range = WeChatForwardRange(unit: .messages, value: count)
+            XCTAssertTrue(range.isValid, "Count: \(count)")
+            XCTAssertTrue(range.isAvailableForAutomation)
+        }
+        for count in [0, -1, Int.min] {
+            let range = WeChatForwardRange(unit: .messages, value: count)
+            XCTAssertFalse(range.isValid)
+            XCTAssertFalse(range.isAvailableForAutomation)
+            XCTAssertNil(range.estimatedSeconds)
+            XCTAssertNil(range.estimatedTimeTitle)
+        }
+        XCTAssertNil(WeChatForwardRange(unit: .messages, value: 10).start(at: Date()))
+    }
+
+    func testTimeRangesKeepTheirExistingLimitsAndHaveNoCountEstimate() {
+        for (unit, maximum) in [(WeChatRangeUnit.hours, 720), (.days, 30)] {
+            let range = WeChatForwardRange(unit: unit, value: maximum)
+            XCTAssertTrue(range.isValid)
+            XCTAssertFalse(range.isAvailableForAutomation)
+            XCTAssertNil(range.estimatedSeconds)
+            XCTAssertNil(range.estimatedTimeTitle)
+            XCTAssertFalse(WeChatForwardRange(unit: unit, value: maximum + 1).isValid)
+            XCTAssertFalse(WeChatForwardRange(unit: unit, value: 0).isValid)
+        }
+    }
+
+    func testCountEstimateUsesFiveSecondsPerHundredAndRoundsUp() {
+        let examples = [(1, 1), (19, 1), (20, 1), (21, 2), (99, 5), (100, 5), (101, 6),
+                        (300, 15), (500, 25), (1200, 60), (2000, 100), (1_000_000, 50_000)]
+        for (count, seconds) in examples {
+            XCTAssertEqual(WeChatForwardRange(value: count).estimatedSeconds, seconds, "Count: \(count)")
+        }
+        // An unsigned oracle can add the rounding offset without overflowing.
+        for count in [Int.max - 19, Int.max - 1, Int.max] {
+            let expected = Int((UInt64(count) + 19) / 20)
+            XCTAssertEqual(WeChatForwardRange(value: count).estimatedSeconds, expected)
+        }
+    }
+
+    func testCountEstimateUsesConciseSecondsMinutesAndHours() {
+        XCTAssertEqual(WeChatForwardRange(value: 300).estimatedTimeTitle, L10n.format("预计约 %@ 秒", "15"))
+        XCTAssertEqual(WeChatForwardRange(value: 1200).estimatedTimeTitle, L10n.format("预计约 %@ 分钟", "1"))
+        XCTAssertEqual(WeChatForwardRange(value: 2000).estimatedTimeTitle, L10n.format("预计约 %@ 分 %@ 秒", "1", "40"))
+        XCTAssertEqual(WeChatForwardRange(value: 72_000).estimatedTimeTitle, L10n.format("预计约 %@ 小时", "1"))
+        XCTAssertEqual(WeChatForwardRange(value: 74_400).estimatedTimeTitle, L10n.format("预计约 %@ 小时 %@ 分钟", "1", "2"))
+        let largest = WeChatForwardRange(value: Int.max)
+        XCTAssertEqual(largest.title, L10n.format("最近 %@ 条消息", String(Int.max)))
+        XCTAssertTrue(largest.estimatedTimeTitle?.contains(String(Int((UInt64(Int.max) + 19) / 20 / 3600))) == true)
+    }
+
+    func testLargeCountPreferencesRoundTripWithoutResettingOrDroppingRecents() throws {
+        var preferences = WeChatForwardPreferences()
+        preferences.recordSuccess(.init(chat: "Large export", range: .init(value: Int.max), targetBundleIdentifier: "app.editor", targetName: "Editor"))
+        let loaded = WeChatForwardPreferences.decode(try JSONEncoder().encode(preferences))
+        XCTAssertEqual(loaded.draft.range.value, Int.max)
+        XCTAssertEqual(loaded.recent, preferences.recent)
+    }
+
+    func testOnlyCountRangesCanStartAutomationWhileOldTimePresetsArePreserved() throws {
+        XCTAssertEqual(WeChatForwardRange(), WeChatForwardRange(unit: .messages, value: 100))
+        XCTAssertTrue(WeChatForwardRange(unit: .messages, value: 105).isAvailableForAutomation)
+        XCTAssertFalse(WeChatForwardRange(unit: .messages, value: 0).isAvailableForAutomation)
+        for unit in [WeChatRangeUnit.hours, .days] {
+            let preset = WeChatForwardPreset(chat: "Saved group", range: .init(unit: unit, value: 3))
+            var preferences = WeChatForwardPreferences()
+            preferences.recordSuccess(preset)
+            let loaded = WeChatForwardPreferences.decode(try JSONEncoder().encode(preferences))
+            XCTAssertEqual(loaded.draft.range, preset.range)
+            XCTAssertEqual(loaded.recent.first?.range, preset.range)
+            XCTAssertFalse(loaded.draft.range.isAvailableForAutomation)
+        }
+    }
+
+    func testPresetRemembersOnlyRecordedSuccessAndReplacesTheSameGroup() throws {
+        var preferences = WeChatForwardPreferences()
+        preferences.draft.chat = "not yet successful"
+        XCTAssertTrue(preferences.recent.isEmpty)
+        let old = WeChatForwardPreset(chat: "Example (500)", range: .init(unit: .hours, value: 5), targetBundleIdentifier: "app.one", targetName: "One")
+        preferences.recordSuccess(old, at: date("2026-09-05 08:00:00"))
+        var new = old
+        new.chat = "Example（499）"
+        new.pastePath = true
+        new.range = .init(unit: .messages, value: 40)
+        preferences.recordSuccess(new)
+        XCTAssertEqual(preferences.recent.count, 1)
+        XCTAssertEqual(preferences.recent[0].chat, "Example")
+        XCTAssertTrue(preferences.recent[0].pastePath)
+        let loaded = WeChatForwardPreferences.decode(try JSONEncoder().encode(preferences))
+        XCTAssertEqual(loaded.recent, preferences.recent)
+        XCTAssertEqual(loaded.draft, preferences.draft)
+        XCTAssertTrue(WeChatForwardPreferences.decode(Data("bad".utf8)).recent.isEmpty)
+    }
+
+    func testLegacyPreferencesWithoutFolderPreserveDraftAndRememberedApplication() throws {
+        let legacy = Data(#"""
+        {
+          "draft": {"chat":"Work", "range":{"unit":"messages","value":150}, "targetBundleIdentifier":"app.editor", "targetName":"Editor", "pastePath":true},
+          "recent": [{"chat":"Saved", "range":{"unit":"days","value":2}, "targetBundleIdentifier":"app.notes", "targetName":"Notes", "pastePath":false, "lastUsed":12345}]
+        }
+        """#.utf8)
+        let preferences = WeChatForwardPreferences.decode(legacy)
+        XCTAssertNil(WeChatForwardPreset().destinationFolder)
+        XCTAssertFalse(WeChatForwardPreset().mergeArchives)
+        XCTAssertFalse(WeChatForwardPreset().htmlPreview)
+        XCTAssertTrue(WeChatForwardPreset().saveImages && WeChatForwardPreset().saveVideos)
+        XCTAssertTrue(preferences.draft.saveImages && preferences.draft.saveVideos)
+        XCTAssertTrue(try XCTUnwrap(preferences.recent.first).saveImages && XCTUnwrap(preferences.recent.first).saveVideos)
+        XCTAssertEqual(preferences.draft.chat, "Work")
+        XCTAssertEqual(preferences.draft.targetBundleIdentifier, "app.editor")
+        XCTAssertEqual(preferences.draft.targetName, "Editor")
+        XCTAssertEqual(preferences.draft.range.value, 150)
+        XCTAssertTrue(preferences.draft.pastePath)
+        XCTAssertNil(preferences.draft.destinationFolder)
+        XCTAssertFalse(preferences.draft.mergeArchives)
+        XCTAssertFalse(preferences.draft.htmlPreview)
+        let recent = try XCTUnwrap(preferences.recent.first)
+        XCTAssertEqual(recent.chat, "Saved")
+        XCTAssertEqual(recent.range, .init(unit: .days, value: 2))
+        XCTAssertEqual(recent.targetBundleIdentifier, "app.notes")
+        XCTAssertEqual(recent.lastUsed, Date(timeIntervalSinceReferenceDate: 12345))
+        XCTAssertNil(recent.destinationFolder)
+        XCTAssertFalse(recent.mergeArchives)
+        XCTAssertFalse(recent.htmlPreview)
+    }
+
+    func testLegacyMergePreferenceDoesNotEnableHTMLPreview() throws {
+        let legacy = Data(#"""
+        {
+          "draft": {"chat":"Merged", "range":{"unit":"messages","value":900}, "targetBundleIdentifier":"app.editor", "targetName":"Editor", "pastePath":false, "mergeArchives":true},
+          "recent": [{"chat":"Saved", "range":{"unit":"messages","value":200}, "targetBundleIdentifier":"app.notes", "targetName":"Notes", "pastePath":true, "mergeArchives":true, "lastUsed":12345}]
+        }
+        """#.utf8)
+        let preferences = WeChatForwardPreferences.decode(legacy)
+        XCTAssertEqual(preferences.draft.chat, "Merged")
+        XCTAssertTrue(preferences.draft.mergeArchives)
+        XCTAssertFalse(preferences.draft.htmlPreview)
+        let recent = try XCTUnwrap(preferences.recent.first)
+        XCTAssertEqual(recent.chat, "Saved")
+        XCTAssertTrue(recent.mergeArchives)
+        XCTAssertFalse(recent.htmlPreview)
+        XCTAssertTrue(recent.pastePath)
+    }
+
+    func testHTMLPreviewIsIndependentOfMergingAndRememberedPerChat() throws {
+        let merged = WeChatForwardPreset(chat: "Merged preview", targetBundleIdentifier: "app.editor", targetName: "Editor", mergeArchives: true, htmlPreview: true)
+        let separate = WeChatForwardPreset(chat: "Separate preview", targetBundleIdentifier: "app.notes", targetName: "Notes", htmlPreview: true)
+        let plain = WeChatForwardPreset(chat: "Plain export", targetBundleIdentifier: "app.editor", targetName: "Editor")
+        var preferences = WeChatForwardPreferences()
+        preferences.recordSuccess(merged)
+        preferences.recordSuccess(separate)
+        preferences.recordSuccess(plain)
+        var loaded = WeChatForwardPreferences.decode(try JSONEncoder().encode(preferences))
+        XCTAssertFalse(loaded.draft.htmlPreview)
+        XCTAssertEqual(loaded.recent.first(where: { $0.chat == merged.chat })?.htmlPreview, true)
+        XCTAssertEqual(loaded.recent.first(where: { $0.chat == merged.chat })?.mergeArchives, true)
+        XCTAssertEqual(loaded.recent.first(where: { $0.chat == separate.chat })?.htmlPreview, true)
+        XCTAssertEqual(loaded.recent.first(where: { $0.chat == separate.chat })?.mergeArchives, false)
+        XCTAssertEqual(loaded.recent.first(where: { $0.chat == plain.chat })?.htmlPreview, false)
+
+        var updated = merged
+        updated.htmlPreview = false
+        loaded.recordSuccess(updated)
+        let reloaded = WeChatForwardPreferences.decode(try JSONEncoder().encode(loaded))
+        XCTAssertEqual(reloaded.recent.count, 3)
+        XCTAssertEqual(reloaded.draft.chat, merged.chat)
+        XCTAssertTrue(reloaded.draft.mergeArchives)
+        XCTAssertFalse(reloaded.draft.htmlPreview)
+        XCTAssertEqual(reloaded.recent.first?.htmlPreview, false)
+        XCTAssertEqual(reloaded.recent.first(where: { $0.chat == separate.chat })?.htmlPreview, true)
+    }
+
+    func testMediaChoicesAreRememberedPerChat() throws {
+        var preferences = WeChatForwardPreferences()
+        preferences.recordSuccess(WeChatForwardPreset(chat: "No images", targetBundleIdentifier: "app.editor", targetName: "Editor", saveImages: false))
+        preferences.recordSuccess(WeChatForwardPreset(chat: "No videos", targetBundleIdentifier: "app.editor", targetName: "Editor", saveVideos: false))
+        let loaded = WeChatForwardPreferences.decode(try JSONEncoder().encode(preferences))
+        XCTAssertEqual(loaded.draft.chat, "No videos")
+        XCTAssertTrue(loaded.draft.saveImages); XCTAssertFalse(loaded.draft.saveVideos)
+        let noImages = try XCTUnwrap(loaded.recent.first { $0.chat == "No images" })
+        XCTAssertFalse(noImages.saveImages); XCTAssertTrue(noImages.saveVideos)
+    }
+
+    func testMergePreferenceIsRememberedPerChatAndReplacedOnSuccess() throws {
+        let merged = WeChatForwardPreset(chat: "Merged group", range: .init(value: 2000), targetBundleIdentifier: "app.editor", targetName: "Editor", mergeArchives: true)
+        let separate = WeChatForwardPreset(chat: "Separate group", range: .init(value: 700), targetBundleIdentifier: "app.notes", targetName: "Notes")
+        var preferences = WeChatForwardPreferences()
+        preferences.recordSuccess(merged)
+        preferences.recordSuccess(separate)
+        var loaded = WeChatForwardPreferences.decode(try JSONEncoder().encode(preferences))
+        XCTAssertFalse(loaded.draft.mergeArchives)
+        XCTAssertEqual(loaded.recent.first(where: { $0.chat == merged.chat })?.mergeArchives, true)
+        XCTAssertEqual(loaded.recent.first(where: { $0.chat == separate.chat })?.mergeArchives, false)
+
+        var updated = merged
+        updated.mergeArchives = false
+        loaded.recordSuccess(updated)
+        let reloaded = WeChatForwardPreferences.decode(try JSONEncoder().encode(loaded))
+        XCTAssertEqual(reloaded.recent.count, 2)
+        XCTAssertEqual(reloaded.draft.chat, merged.chat)
+        XCTAssertFalse(reloaded.draft.mergeArchives)
+        XCTAssertEqual(reloaded.recent.first?.mergeArchives, false)
+    }
+
+    func testMergeRecommendationOnlyAppliesAboveFiveHundredMessagesForUnmergedAppDelivery() {
+        var preset = WeChatForwardPreset(range: .init(value: 500), targetBundleIdentifier: "app.editor", targetName: "Editor")
+        XCTAssertFalse(preset.recommendsMergingArchives)
+        preset.range.value = 501
+        XCTAssertTrue(preset.recommendsMergingArchives)
+        preset.range.value = Int.max
+        XCTAssertTrue(preset.recommendsMergingArchives)
+        preset.mergeArchives = true
+        XCTAssertFalse(preset.recommendsMergingArchives)
+        preset.mergeArchives = false
+        preset.destinationFolder = URL(fileURLWithPath: "/tmp/exports", isDirectory: true)
+        XCTAssertFalse(preset.recommendsMergingArchives)
+        preset.destinationFolder = nil
+        preset.range = .init(unit: .hours, value: 600)
+        XCTAssertFalse(preset.recommendsMergingArchives)
+        preset.range = .init(value: 0)
+        XCTAssertFalse(preset.recommendsMergingArchives)
+    }
+
+    func testFolderPresetRoundTripsAndRemembersSuccessfulFolderForTheSameChat() throws {
+        let folder = URL(fileURLWithPath: "/tmp/群聊 exports", isDirectory: true)
+        let preset = WeChatForwardPreset(chat: "Example（500）", targetBundleIdentifier: "app.old", targetName: "Old",
+                                         destinationFolder: folder, pastePath: true, mergeArchives: true, htmlPreview: true)
+        XCTAssertEqual(preset.destinationFolder, folder)
+        XCTAssertEqual(preset.targetBundleIdentifier, "")
+        XCTAssertEqual(preset.targetName, "")
+        XCTAssertFalse(preset.pastePath)
+        XCTAssertTrue(preset.mergeArchives)
+        XCTAssertTrue(preset.htmlPreview)
+        var preferences = WeChatForwardPreferences()
+        preferences.recordSuccess(.init(chat: "Example", targetBundleIdentifier: "app.old", targetName: "Old"))
+        preferences.recordSuccess(preset, at: Date(timeIntervalSinceReferenceDate: 12345))
+        let loaded = WeChatForwardPreferences.decode(try JSONEncoder().encode(preferences))
+        XCTAssertEqual(loaded.draft, preferences.draft)
+        XCTAssertEqual(loaded.recent, preferences.recent)
+        XCTAssertEqual(loaded.recent.count, 1)
+        XCTAssertEqual(loaded.recent.first?.chat, "Example")
+        XCTAssertEqual(loaded.recent.first?.destinationFolder, folder)
+        XCTAssertFalse(loaded.draft.pastePath)
+        XCTAssertTrue(loaded.draft.mergeArchives)
+        XCTAssertTrue(loaded.draft.htmlPreview)
+    }
+
+    func testDecodingFolderOverridesStaleApplicationAndPathMode() throws {
+        let encoded = Data(#"""
+        {"chat":"Saved", "range":{"unit":"messages","value":100}, "targetBundleIdentifier":"app.old", "targetName":"Old", "pastePath":true, "destinationFolder":"file:///tmp/exports/"}
+        """#.utf8)
+        let preset = try JSONDecoder().decode(WeChatForwardPreset.self, from: encoded)
+        XCTAssertEqual(preset.destinationFolder?.path, "/tmp/exports")
+        XCTAssertEqual(preset.targetBundleIdentifier, "")
+        XCTAssertEqual(preset.targetName, "")
+        XCTAssertFalse(preset.pastePath)
+        XCTAssertFalse(preset.mergeArchives)
+        XCTAssertFalse(preset.htmlPreview)
+    }
+
+    func testExplicitNullFolderStillDecodesAsAnApplicationPreset() throws {
+        let encoded = Data(#"""
+        {"chat":"Saved", "range":{"unit":"messages","value":100}, "targetBundleIdentifier":"app.editor", "targetName":"Editor", "pastePath":true, "destinationFolder":null}
+        """#.utf8)
+        let preset = try JSONDecoder().decode(WeChatForwardPreset.self, from: encoded)
+        XCTAssertNil(preset.destinationFolder)
+        XCTAssertEqual(preset.targetBundleIdentifier, "app.editor")
+        XCTAssertTrue(preset.pastePath)
+    }
+
+    // Independently generated with Python's zipfile: two repeated multiline
+    // messages, a media reference, UTF-8 filenames, and an attachment CRC.
+    private let storedZIP = "UEsDBBQAAAgAAMBAJV0fGRySiQAAAIkAAAAQAAAA6IGK5aSp6K6w5b2VLnR4dMK355SyCjIwMjblubQ55pyINeaXpSAwODowNQrkvaDlpb0K56ys5LqM6KGMCgrCt+S5mQoyMDI25bm0OeaciDXml6UgMDg6MDUK5L2g5aW9CuesrOS6jOihjAoKwrfnlLIKMjAyNuW5tDnmnIg15pelIDA4OjA2CmltYWdlcy9waG90by5wbmcKUEsDBBQAAAAAAMBAJV2KfiaRIAAAACAAAAAQAAAAaW1hZ2VzL3Bob3RvLnBuZwABAgMEBQYHCAkKCwwNDg8QERITFBUWFxgZGhscHR4fUEsBAhQDFAAACAAAwEAlXR8ZHJKJAAAAiQAAABAAAAAAAAAAAAAAAIABAAAAAOiBiuWkqeiusOW9lS50eHRQSwECFAMUAAAAAADAQCVdin4mkSAAAAAgAAAAEAAAAAAAAAAAAAAAgAG3AAAAaW1hZ2VzL3Bob3RvLnBuZ1BLBQYAAAAAAgACAHwAAAAFAQAAAAA="
+    private let deflatedZIP = "UEsDBBQAAAgIAMBAJV0fGRySUAAAAIkAAAAQAAAA6IGK5aSp6K6w5b2VLnR4dDu0/fmUTVxGBkZmT3dusXw2p8P02fSlCgYWVgamXE/2Lni6dC/X8zVrnuzqebGwh4vr0PYnO2eSoBqX2WZcmbmJ6anF+gUZ+SX5egV56VwAUEsDBBQAAAAIAMBAJV2KfiaRIgAAACAAAAAQAAAAaW1hZ2VzL3Bob3RvLnBuZ2NgZGJmYWVj5+Dk4ubh5eMXEBQSFhEVE5eQlJKWkZWTBwBQSwECFAMUAAAICADAQCVdHxkcklAAAACJAAAAEAAAAAAAAAAAAAAAgAEAAAAA6IGK5aSp6K6w5b2VLnR4dFBLAQIUAxQAAAAIAMBAJV2KfiaRIgAAACAAAAAQAAAAAAAAAAAAAACAAX4AAABpbWFnZXMvcGhvdG8ucG5nUEsFBgAAAAACAAIAfAAAAM4AAAAAAA=="
+
+    func testNativeArchiveStoredAndDeflatedWithMedia() throws {
+        for encoded in [storedZIP, deflatedZIP] {
+            let data = try XCTUnwrap(Data(base64Encoded: encoded))
+            XCTAssertEqual(try WeChatNativeArchive.messageCount(data), 3)
+        }
+    }
+
+    // Fictional fixtures generated independently with Python zipfile. The
+    // archive reader accepts the native output without observing AX bodies.
+    func testNativeArchiveEstimatesCountsAroundTheHundredMessageBatch() throws {
+        let fixtures: [(Int, String)] = [
+            (99, "UEsDBBQAAAAIAAAAJ10RN2wSUAEAABAnAAAOAAAAdHJhbnNjcmlwdC50eHTt0V9LwlAYBvD7fYqxiy6d7aJIkD5I7GK0kaJNcbOCCJRmamIrIkWxf+ToDxReiFZTL/ZZds7ZvkWTirrU++dcPnDeh/f9eeOg06U3FrEvwlI5KFU4KS6tkY/hBu3V1mnb4VelRDzObdHeC712SPOe1asyT1sDVq8x1/LdEX8oZNK6KiSEop7Rc/u6cMRx3qJzw8sZPXNknvU//VmDT5lm3kiIonag7OazWiyt7ynZtCrmFTO1+TM/GUVFbSVXULVCcjul6DuaunhjtIj/3gimU9a1ws58AdF3XWrZ5LzJHgcxxTA0c4kFgvIp6T8HbwMyvZI5PnremJxUwuOnv6/zNOpltw5tj8L2kN5NyMT+F3/flb4+0FZ1iW6gAAUoQAEKUIACFKAABShAAQpQgAIUoAAFKEABClCAAhSgAAUoQAEKUIACFKAABShAAcovyhdQSwECFAMUAAAACAAAACddETdsElABAAAQJwAADgAAAAAAAAAAAAAAgAEAAAAAdHJhbnNjcmlwdC50eHRQSwUGAAAAAAEAAQA8AAAAfAEAAAAA"),
+            (100, "UEsDBBQAAAAIAAAAJ11udzJtUgEAAIwnAAAOAAAAdHJhbnNjcmlwdC50eHTt0V9LwlAYBvD7fYqxiy6d7aJIkD5I7GK0kUOb4mYFESjN1MQsIkWxf+ToDxReiFZTL/ZZds7ZvkWTgrrUuy6ec/nAeR/e9+eNg06X3tikeREWS0GxzElxaY18DDdor7pO2w6/KiXicW6L9l7otUMa96xWkXnaGrBalbm27474QyGtG6qQEApG2sjuG8IRx3mLzg0vZ/TMkXnW//RndT5lWTkzIYragbKby2gx3dhTMroq5hQrtfkzPxlFBW0lm1e1fHI7pRg7mrp4Y7SI/14PplPWtcPOfAHRd11qN8l5gz0OYoppatYSCwSlU9J/Dt4GZHolc3z0vDE5KYfHT79f52nUy24d2h6F7SG9m5BJ80/8fVf6+kBblSW6gQIUoAAFKEABClCAAhSgAAUoQAEKUIACFKAABShAAQpQgAIUoAAFKEABClCAAhSgAAUo/wHlC1BLAQIUAxQAAAAIAAAAJ11udzJtUgEAAIwnAAAOAAAAAAAAAAAAAACAAQAAAAB0cmFuc2NyaXB0LnR4dFBLBQYAAAAAAQABADwAAAB+AQAAAAA="),
+            (101, "UEsDBBQAAAAIAAAAJ100fEIVUQEAAOQnAAAOAAAAdHJhbnNjcmlwdC50eHTt0V9LwlAYBvD7fYqxiy6d7aJIkD5I7GK0kUOb4mYFESjN1MQsIkWxf+ToDxReiFZTL/ZZds7ZvkWTgrrU23jO5QPnfXjfnzcOOl16Y5PmRVgsBcUyJ8WlNfIx3KC96jptO/yqlIjHuS3ae6HXDmncs1pF5mlrwGpV5tq+O+IPhbRuqEJCKBhpI7tvCEcc5y06N7yc0TNH5ln/05/V+ZRl5cyEKGoHym4uo8V0Y0/J6KqYU6zU5s/8ZBQVtJVsXtXyye2UYuxo6uKN0SL+ez2YTlnXDjvzBUTfdandJOcN9jiIKaapWUssEJROSf85eBuQ6ZXM8dHzxuSkHB4//X6dp1Evu3VoexS2h/RuQibNP/H3XenrA21VlugGClCAAhSgAAUoQAEKUIACFKAABShAAQpQgAIUoAAFKEABClCAAhSgAAUoQAEKUIACFKD8Z5QvUEsBAhQDFAAAAAgAAAAnXTR8QhVRAQAA5CcAAA4AAAAAAAAAAAAAAIABAAAAAHRyYW5zY3JpcHQudHh0UEsFBgAAAAABAAEAPAAAAH0BAAAAAA=="),
+        ]
+        for (expected, encoded) in fixtures {
+            let data = try XCTUnwrap(Data(base64Encoded: encoded))
+            XCTAssertEqual(try WeChatNativeArchive.messageCount(data), expected)
+        }
+    }
+
+    func testNativeArchiveAcceptsUnknownCardsMissingReferencesAndUnorderedDates() throws {
+        let data = try XCTUnwrap(Data(base64Encoded: "UEsDBBQAAAAIAAAAJ10x879qEQEAAJQBAAAOAAAAdHJhbnNjcmlwdC50eHQ7tP3FzFnP5rU87Z/4sqHxRUMrl5GBkdnTnVssn83pMH82famCoZGVgTFX9LM5q57NXfq0d+HzzvZYhWfTNjzv7Hi+u+XJ7m0K1UrZmXkpSlZKpXnZefnleUq1XFyHiDLXkCv65eR9z/qWxio8X7Lryb5uhYySkoJiK3391IrE3IKcVL3MvLLEnMwU/YLEkgx7qPm2QKHSVLX8opTUItvkjMS89NQU4m0EeuTJju4Xe/c+n9XycibIA/pPdu9+1tL/dELv8+Ub9BKLi1NLiDXOgCv6RWPX0yUrX6zb8HTv1FguBSA4tP1pW+vL5hUIrSBRoL3P5y99Nn3by+lbni3Y83RPP5IwJFyfrV38bFo7FwBQSwECFAMUAAAACAAAACddMfO/ahEBAACUAQAADgAAAAAAAAAAAAAAgAEAAAAAdHJhbnNjcmlwdC50eHRQSwUGAAAAAAEAAQA8AAAAPQEAAAAA"))
+        XCTAssertEqual(try WeChatNativeArchive.messageCount(data), 4)
+    }
+
+    func testNativeArchiveUsesLargestRecognizableTranscriptCount() throws {
+        let data = try XCTUnwrap(Data(base64Encoded: "UEsDBBQAAAAIAAAAJ1206EYGOQAAAFkAAAAOAAAAdHJhbnNjcmlwdC50eHQ7tP3FzFnP5rU87Z/4sqHxRUMrl5GBkdnTnVssn83pMH82famCoZGVgQHX8ymbuLgOEan4yc6ZXABQSwMEFAAAAAgAAAAnXazxhbVAAAAAswAAABIAAABhdHRhY2hlZC9vdGhlci5UWFQ7tP3FzFnP5rU87Z/4sqHxRUMrl5GBkdnTnVssn83pMH82famCoZGVgQHX8ymbuLgOEan4yc6ZJCjeQZLiRi4AUEsDBBQAAAAIAAAAJ12Q6/sAGAAAABYAAAAKAAAAcmVhZG1lLnR4dHNUSCstKS1KVUitKMgvKlFIyy/KTSwBAFBLAQIUAxQAAAAIAAAAJ1206EYGOQAAAFkAAAAOAAAAAAAAAAAAAACAAQAAAAB0cmFuc2NyaXB0LnR4dFBLAQIUAxQAAAAIAAAAJ12s8YW1QAAAALMAAAASAAAAAAAAAAAAAACAAWUAAABhdHRhY2hlZC9vdGhlci5UWFRQSwECFAMUAAAACAAAACddkOv7ABgAAAAWAAAACgAAAAAAAAAAAAAAgAHVAAAAcmVhZG1lLnR4dFBLBQYAAAAAAwADALQAAAAVAQAAAAA="))
+        XCTAssertEqual(try WeChatNativeArchive.messageCount(data), 4)
+    }
+
+    func testNativeArchiveKeepsUnknownTextAndAttachmentOnlyArchivesWithoutACount() throws {
+        let fixtures = [
+            "UEsDBBQAAAAIAAAAJ10muxkFOQAAADsAAAAOAAAAdHJhbnNjcmlwdC50eHR7NmfV8/lLn89qeTZtw7MFe57u6efKTS0uTkxPtVJIrUjMLchJ5cooKSkottLXh/L1MvPKEnMyUwBQSwMEFAAAAAgAAAAnXYp+JpEiAAAAIAAAAA4AAABhdHRhY2htZW50LmJpbmNgZGJmYWVj5+Dk4ubh5eMXEBQSFhEVE5eQlJKWkZWTBwBQSwECFAMUAAAACAAAACddJrsZBTkAAAA7AAAADgAAAAAAAAAAAAAAgAEAAAAAdHJhbnNjcmlwdC50eHRQSwECFAMUAAAACAAAACddin4mkSIAAAAgAAAADgAAAAAAAAAAAAAAgAFlAAAAYXR0YWNobWVudC5iaW5QSwUGAAAAAAIAAgB4AAAAswAAAAAA",
+            "UEsDBBQAAAAIAAAAJ10AjkiuBgAAAAQAAAAOAAAAdHJhbnNjcmlwdC50eHT7/+8XAwBQSwMEFAAAAAgAAAAnXYp+JpEiAAAAIAAAAA4AAABhdHRhY2htZW50LmJpbmNgZGJmYWVj5+Dk4ubh5eMXEBQSFhEVE5eQlJKWkZWTBwBQSwECFAMUAAAACAAAACddAI5IrgYAAAAEAAAADgAAAAAAAAAAAAAAgAEAAAAAdHJhbnNjcmlwdC50eHRQSwECFAMUAAAACAAAACddin4mkSIAAAAgAAAADgAAAAAAAAAAAAAAgAEyAAAAYXR0YWNobWVudC5iaW5QSwUGAAAAAAIAAgB4AAAAgAAAAAAA",
+            "UEsDBBQAAAAIAAAAJ12KfiaRIgAAACAAAAAOAAAAYXR0YWNobWVudC5iaW5jYGRiZmFlY+fg5OLm4eXjFxAUEhYRFROXkJSSlpGVkwcAUEsBAhQDFAAAAAgAAAAnXYp+JpEiAAAAIAAAAA4AAAAAAAAAAAAAAIABAAAAAGF0dGFjaG1lbnQuYmluUEsFBgAAAAABAAEAPAAAAE4AAAAAAA==",
+        ]
+        for encoded in fixtures {
+            let data = try XCTUnwrap(Data(base64Encoded: encoded))
+            XCTAssertNil(try WeChatNativeArchive.messageCount(data))
+        }
+    }
+
+    func testNativeArchiveRejectsEmptyFilesAndArchives() throws {
+        let fixtures = [
+            Data(),
+            try XCTUnwrap(Data(base64Encoded: "UEsFBgAAAAAAAAAAAAAAAAAAAAAAAA==")),
+            try XCTUnwrap(Data(base64Encoded: "UEsDBBQAAAAIAAAAJ10AAAAAAgAAAAAAAAAOAAAAdHJhbnNjcmlwdC50eHQDAFBLAQIUAxQAAAAIAAAAJ10AAAAAAgAAAAAAAAAOAAAAAAAAAAAAAACAAQAAAAB0cmFuc2NyaXB0LnR4dFBLBQYAAAAAAQABADwAAAAuAAAAAAA=")),
+        ]
+        for data in fixtures {
+            XCTAssertThrowsError(try WeChatNativeArchive.messageCount(data)) { error in
+                XCTAssertEqual(error as? WeChatReadError, .invalidTranscript)
+            }
+        }
+    }
+
+    func testTranscriptParserKeepsMultilineBodiesAndRejectsUnrecognizedHeaders() throws {
+        let rows = try records([("2026年9月5日 08:05", "第一行\n第二行"), ("2026年9月5日 08:06", "再见")])
+        XCTAssertEqual(rows.map(\.text), ["第一行\n第二行", "再见"])
+        XCTAssertThrowsError(try WeChatTranscriptRecord.parse("unrecognized text"))
+    }
+
+    func testViewportNavigationUsesContentAndTranslationInsteadOfCellIndices() throws {
+        func row(_ text: String, _ y: Double, _ h: Double = 100) -> WeChatViewportRow { .init(text: text, y: y, height: h) }
+        var viewport = WeChatViewport(rows: [row("A", -20), row("B", 80), row("C", 180)], anchorIndex: 2)
+        // The cells were recycled and older content appeared above the overlap.
+        try viewport.advance([row("older", -30, 160), row("A", 130), row("B", 230)], older: true)
+        XCTAssertEqual(viewport.firstOrdinal, 3)
+        XCTAssertEqual(viewport.index(of: 2), 1)
+        XCTAssertEqual(viewport.lastDisplacement, 150)
+        try viewport.advance([row("A", 30), row("B", 130), row("C", 230)], older: false)
+        XCTAssertEqual(viewport.firstOrdinal, 2)
+        XCTAssertThrowsError(try viewport.advance([row("unrelated", 10)], older: true))
+    }
+
+    func testViewportReconstructsIndicesAroundAKnownOrdinal() {
+        let rows = ["older", "anchor", "newer"].enumerated().map {
+            WeChatViewportRow(text: $1, y: Double($0) * 100, height: 100)
+        }
+        let viewport = WeChatViewport(rows: rows, anchorIndex: 1, anchorOrdinal: 100)
+        XCTAssertEqual(viewport.firstOrdinal, 101)
+        XCTAssertEqual(viewport.index(of: 100), 1)
+        XCTAssertEqual(viewport.index(of: 101), 0)
+        XCTAssertEqual(viewport.index(of: 99), 2)
+        XCTAssertNil(viewport.index(of: 102))
+        XCTAssertNil(viewport.index(of: 98))
+        XCTAssertEqual(WeChatViewport(rows: rows, anchorIndex: 1).index(of: 0), 1)
+    }
+
+    func testViewportKeepsKnownOrdinalThroughResumeAndRepeatedOverlap() throws {
+        func row(_ text: String, _ y: Double) -> WeChatViewportRow { .init(text: text, y: y, height: 100) }
+        // Keyboard navigation found ordinal 99 at the second repeated row.
+        var viewport = WeChatViewport(
+            rows: [row("boundary", -20), row("repeated", 80), row("repeated", 180), row("newer", 280)],
+            anchorIndex: 2, anchorOrdinal: 99
+        )
+        try viewport.resume([row("boundary", 0), row("repeated", 100), row("repeated", 200), row("newer", 300)])
+        XCTAssertEqual(viewport.firstOrdinal, 101)
+        XCTAssertEqual(viewport.index(of: 99), 2)
+        XCTAssertEqual(viewport.lastDisplacement, 20)
+
+        try viewport.advance([row("older", 0), row("boundary", 100), row("repeated", 200), row("repeated", 300)], older: true)
+        XCTAssertEqual(viewport.firstOrdinal, 102)
+        XCTAssertEqual(viewport.index(of: 100), 2)
+        XCTAssertEqual(viewport.index(of: 99), 3)
+        XCTAssertNil(viewport.index(of: 98))
+        XCTAssertEqual(viewport.lastDisplacement, 100)
+
+        // Both repeated occurrences participate in the overlap on the way back.
+        try viewport.advance([row("repeated", 0), row("repeated", 100), row("newer", 200), row("latest", 300)], older: false)
+        XCTAssertEqual(viewport.firstOrdinal, 100)
+        XCTAssertEqual(viewport.index(of: 100), 0)
+        XCTAssertEqual(viewport.index(of: 99), 1)
+        XCTAssertEqual(viewport.index(of: 98), 2)
+        XCTAssertEqual(viewport.lastDisplacement, -200)
+    }
+
+    func testResumeKeepsExistingOrdinalsWhenLiveMessagesChangeVisibleRows() throws {
+        func row(_ text: String, _ y: Double) -> WeChatViewportRow { .init(text: text, y: y, height: 100) }
+        let original = [row("A", 0), row("B", 100), row("C", 200)]
+        for (next, targetIndex) in [
+            ([row("A", 0), row("B", 100), row("C", 200), row("D", 300)], 1),
+            ([row("B", 0), row("C", 100), row("D", 200)], 0),
+        ] {
+            var viewport = WeChatViewport(rows: original, anchorIndex: 1, anchorOrdinal: 100)
+            XCTAssertNoThrow(try viewport.resume(next))
+            XCTAssertEqual(viewport.index(of: 100), targetIndex)
+        }
+    }
+
+    func testResumeAfterSelectionToleratesLiveMessageAndCardRelayout() throws {
+        var viewport = WeChatViewport(rows: [
+            .init(text: "Sender A", y: 0, height: 100),
+            .init(text: "Sender B", y: 100, height: 100),
+            .init(text: "Sender C", y: 200, height: 100),
+        ], anchorIndex: 1, anchorOrdinal: 100)
+        try viewport.resume([
+            .init(text: "A", y: 20, height: 100),
+            .init(text: "B", y: 120, height: 130),
+            .init(text: "C", y: 250, height: 100),
+            .init(text: "D", y: 350, height: 100),
+        ], afterLeavingSelection: true)
+        XCTAssertEqual(viewport.firstOrdinal, 101)
+        XCTAssertEqual(viewport.index(of: 100), 1)
+    }
+
+    func testAdvanceKeepsExistingOrdinalsAfterOppositeLiveMessageShift() throws {
+        func row(_ text: String, _ y: Double) -> WeChatViewportRow { .init(text: text, y: y, height: 100) }
+        let original = [row("A", 0), row("B", 100), row("C", 200)]
+        for (next, targetIndex) in [
+            ([row("A", -50), row("B", 50), row("C", 150), row("D", 250)], 1),
+            ([row("B", 0), row("C", 100), row("D", 200)], 0),
+        ] {
+            var viewport = WeChatViewport(rows: original, anchorIndex: 1, anchorOrdinal: 100)
+            XCTAssertNoThrow(try viewport.advance(next, older: true))
+            XCTAssertEqual(viewport.index(of: 100), targetIndex)
+        }
+    }
+
+    func testAdvanceRepeatedLiveMessagesPreferNearbyExistingOrdinal() throws {
+        func row(_ y: Double) -> WeChatViewportRow { .init(text: "repeated", y: y, height: 100) }
+        var viewport = WeChatViewport(rows: [row(0), row(100), row(200)], anchorIndex: 2)
+        try viewport.advance([row(-100), row(0), row(100), row(200)], older: true)
+        XCTAssertEqual(viewport.firstOrdinal, 2)
+        XCTAssertEqual(viewport.lastDisplacement, -100)
+    }
+
+    func testContextResolvesWhenLiveTailChangesOverlapLength() throws {
+        let selected = ["Sender A", "Sender B", "Sender C"]
+        XCTAssertEqual(try WeChatMessageContext.resolve(selected: selected, target: 1, normal: ["B", "C"]), 0)
+        XCTAssertEqual(try WeChatMessageContext.resolve(selected: selected, target: 1, normal: ["B", "C", "D"]), 0)
+    }
+
+    func testContextRepeatedLiveMessagesPreferOriginalVisiblePosition() throws {
+        XCTAssertEqual(try WeChatMessageContext.resolve(selected: ["Sender R", "Sender R", "Sender R"], target: 1, normal: ["R", "R", "R", "R"]), 1)
+    }
+
+    func testRangeSelectionOfOversizedEndpointRequiresInsetAndKeyboardProof() {
+        func viewport(_ y: Double) -> WeChatViewport {
+            .init(rows: [.init(text: "oversized", y: y, height: 1370)], anchorIndex: 0, anchorOrdinal: 99)
+        }
+        for keyboardVerified in [false, true] {
+            XCTAssertFalse(viewport(139).canSelectRange(endingAt: 99, listTop: 139, listHeight: 629, keyboardVerified: keyboardVerified))
+        }
+        XCTAssertTrue(viewport(147).canSelectRange(endingAt: 99, listTop: 139, listHeight: 629, keyboardVerified: true))
+        XCTAssertFalse(viewport(147).canSelectRange(endingAt: 99, listTop: 139, listHeight: 629, keyboardVerified: false))
+        XCTAssertFalse(viewport(147).canSelectRange(endingAt: 100, listTop: 139, listHeight: 629, keyboardVerified: true))
+    }
+
+    func testRangeSelectionIgnoresPartialOlderRowButRejectsAnotherStartingInside() {
+        func viewport(olderY: Double, olderHeight: Double) -> WeChatViewport {
+            .init(rows: [
+                .init(text: "older", y: olderY, height: olderHeight),
+                .init(text: "oversized", y: 147, height: 1370),
+            ], anchorIndex: 1, anchorOrdinal: 199)
+        }
+        XCTAssertTrue(viewport(olderY: 39, olderHeight: 108).canSelectRange(endingAt: 199, listTop: 139, listHeight: 629, keyboardVerified: true))
+        XCTAssertFalse(viewport(olderY: 39, olderHeight: 108).canSelectRange(endingAt: 199, listTop: 139, listHeight: 629, keyboardVerified: false))
+        XCTAssertFalse(viewport(olderY: 143, olderHeight: 4).canSelectRange(endingAt: 199, listTop: 139, listHeight: 629, keyboardVerified: true))
+    }
+
+    func testRangeSelectionRetainsFirstFullyVisibleEndpointBehavior() {
+        let viewport = WeChatViewport(rows: [
+            .init(text: "partial older", y: 39, height: 108),
+            .init(text: "endpoint", y: 147, height: 100),
+            .init(text: "newer", y: 247, height: 100),
+        ], anchorIndex: 1, anchorOrdinal: 99)
+        for keyboardVerified in [false, true] {
+            XCTAssertTrue(viewport.canSelectRange(endingAt: 99, listTop: 139, listHeight: 629, keyboardVerified: keyboardVerified))
+            XCTAssertFalse(viewport.canSelectRange(endingAt: 98, listTop: 139, listHeight: 629, keyboardVerified: keyboardVerified))
+        }
+        let flush = WeChatViewport(rows: [.init(text: "endpoint", y: 139, height: 100)], anchorIndex: 0)
+        XCTAssertFalse(flush.canSelectRange(endingAt: 0, listTop: 139, listHeight: 629, keyboardVerified: false))
+    }
+
+    func testSecondBatchResumesAtExactlyOneMessageOlderThanFirstHundred() throws {
+        func row(_ text: String, _ y: Double) -> WeChatViewportRow { .init(text: text, y: y, height: 100) }
+        var viewport = WeChatViewport(rows: [row("m100", -90), row("m99", 10), row("m98", 110)], anchorIndex: 100)
+        // A recipient sheet was closed. Its old AX handles are not reused.
+        try viewport.resume([row("m100", -90), row("m99", 10), row("m98", 110)])
+        try viewport.advance([row("m100", 0), row("m99", 100), row("m98", 200)], older: true)
+        XCTAssertEqual(viewport.index(of: 100), 0)
+        XCTAssertEqual(viewport.index(of: 99), 1)
+        // A newly visible row changes indices without changing known ordinals.
+        try viewport.resume([row("older", 0), row("m100", 100), row("m99", 200)])
+        XCTAssertEqual(viewport.index(of: 100), 1)
+        XCTAssertThrowsError(try viewport.resume([row("unrelated", 0)]))
+    }
+
+    func testExternalSharingExitsMultiSelectWithoutLosingTheNextBatchPosition() throws {
+        func row(_ text: String, _ y: Double) -> WeChatViewportRow { .init(text: text, y: y, height: 100) }
+        var viewport = WeChatViewport(rows: [row("甲 第101条", -90), row("乙 第100条", 10), row("甲 第99条", 110)], anchorIndex: 100)
+        let normal = [row("第101条", -90), row("第100条", 10), row("第99条", 110)]
+        XCTAssertThrowsError(try viewport.resume(normal))
+        try viewport.resume(normal, afterLeavingSelection: true)
+        try viewport.advance([row("第101条", 0), row("第100条", 100), row("第99条", 200)], older: true)
+        XCTAssertEqual(viewport.index(of: 100), 0)
+        XCTAssertEqual(viewport.index(of: 99), 1)
+        try viewport.resume([row("第102条", 0), row("第101条", 100), row("第100条", 200)], afterLeavingSelection: true)
+        XCTAssertEqual(viewport.index(of: 100), 1)
+        XCTAssertThrowsError(try viewport.resume([row("无关消息", 0)], afterLeavingSelection: true))
+    }
+
+    func testSelectionModeChangeUsesOrderedContextAndRetainsDuplicateOccurrences() throws {
+        let selected = ["甲 开始", "乙 重复", "乙 重复", "甲 结束"]
+        XCTAssertEqual(try WeChatMessageContext.resolve(selected: selected, target: 2, normal: ["开始", "重复", "重复", "结束"]), 2)
+        XCTAssertEqual(try WeChatMessageContext.resolve(selected: selected, target: 2, normal: ["更早", "开始", "重复", "重复", "结束"]), 3)
+        XCTAssertThrowsError(try WeChatMessageContext.resolve(selected: selected, target: 2, normal: ["无关", "重复", "结束"]))
+        XCTAssertEqual(try WeChatMessageContext.resolve(selected: ["甲 图片", "甲 图片", "甲 图片"], target: 1, normal: ["图片", "图片", "图片", "图片"]), 1)
+    }
+
+    func testKeyboardRowPinsTheEndpointNudgeThroughABurstOfPhotosFromOneSender() throws {
+        func photo(_ y: Double) -> WeChatViewportRow { .init(text: "甲 图片", y: y, height: 240) }
+        // Up left ordinal 99 flush against the top edge. The nudge off that
+        // edge moves 6 points and uncovers a sliver of ordinal 100.
+        var viewport = WeChatViewport(rows: [photo(-24), photo(216), photo(456)], anchorIndex: 0, anchorOrdinal: 99)
+        try viewport.pin([photo(-258), photo(-18), photo(222), photo(462)], index: 1, ordinal: 99)
+        XCTAssertEqual(viewport.firstOrdinal, 100)
+        XCTAssertEqual(viewport.lastDisplacement, 6)
+        XCTAssertTrue(viewport.canSelectRange(endingAt: 99, listTop: -24, listHeight: 613, keyboardVerified: true))
+    }
+
+    func testKeyboardRowPinsTheNextBatchAnchorAmongPhotosThatNoLongerNameTheirSender() throws {
+        func photos(_ ys: [Double]) -> [WeChatViewportRow] { ys.map { .init(text: "图片", y: $0, height: 240) } }
+        var viewport = WeChatViewport(rows: [
+            .init(text: "乙 图片", y: -90, height: 240), .init(text: "丙 图片", y: 150, height: 240), .init(text: "甲 图片", y: 390, height: 240),
+        ], anchorIndex: 2, anchorOrdinal: 99)
+        // Sharing leaves the list where it was; outside multi-select all read 图片.
+        try viewport.pin(photos([-90, 150, 390]), index: 2, ordinal: 99, afterLeavingSelection: true)
+        XCTAssertEqual(viewport.firstOrdinal, 101)
+        XCTAssertEqual(viewport.lastDisplacement, 0)
+        // One wheel step uncovers another photo, which content alone reads as no movement.
+        try viewport.pin(photos([-246, -6, 234, 474]), index: 3, ordinal: 99)
+        XCTAssertEqual(viewport.firstOrdinal, 102)
+        XCTAssertEqual(viewport.index(of: 100), 2)
+        XCTAssertEqual(viewport.lastDisplacement, 84)
+    }
+
+    func testPinRefusesAKeyboardRowTheSharedRowsContradictOrThatWasNeverTracked() throws {
+        func row(_ text: String, _ y: Double) -> WeChatViewportRow { .init(text: text, y: y, height: 100) }
+        var viewport = WeChatViewport(rows: [row("A", 0), row("B", 100)], anchorIndex: 1, anchorOrdinal: 99)
+        let next = [row("A", 10), row("B", 110)]
+        XCTAssertThrowsError(try viewport.pin(next, index: 0, ordinal: 99))
+        XCTAssertThrowsError(try viewport.pin(next, index: 1, ordinal: 98))
+        XCTAssertThrowsError(try viewport.pin(next, index: 2, ordinal: 99))
+        XCTAssertEqual(viewport.firstOrdinal, 100)
+        try viewport.pin(next, index: 1, ordinal: 99)
+        XCTAssertEqual(viewport.index(of: 100), 0)
+        XCTAssertEqual(viewport.lastDisplacement, 10)
+    }
+    func testNativeArchiveRejectsCorruptionTruncationAndCancellation() throws {
+        var data = try XCTUnwrap(Data(base64Encoded: storedZIP))
+        data[245] ^= 0xff // attachment payload, outside the transcript
+        XCTAssertThrowsError(try WeChatNativeArchive.messageCount(data))
+        XCTAssertThrowsError(try WeChatNativeArchive.messageCount(Data(data.dropLast(8))))
+        XCTAssertThrowsError(try WeChatNativeArchive.messageCount(Data(base64Encoded: deflatedZIP)!, checkCancellation: { throw CancellationError() })) { error in
+            XCTAssertTrue(error is CancellationError)
+        }
+    }
+}
+
+extension WeChatForwardTests {
+    /// The field showed "②00" — a Chinese IME offered a circled numeral and the
+    /// free-text field took it, because `TextField(value:format:)` only parses
+    /// when it loses focus.
+    func testCircledAndFullWidthNumeralsFoldToDigits() {
+        XCTAssertEqual(WeChatForwardRange.digits("②00"), "200")
+        XCTAssertEqual(WeChatForwardRange.digits("２００"), "200")
+        XCTAssertEqual(WeChatForwardRange.digits("三00"), "300")
+        XCTAssertEqual(WeChatForwardRange.digits("٣٠٠"), "300")
+    }
+
+    func testAnythingThatIsNotADigitIsRefused() {
+        XCTAssertEqual(WeChatForwardRange.digits("1a2 3-"), "123")
+        XCTAssertEqual(WeChatForwardRange.digits("1.5"), "15")
+        XCTAssertEqual(WeChatForwardRange.digits("abc"), "")
+        XCTAssertEqual(WeChatForwardRange.digits(""), "")
+        // 十 and 百 carry numeric values of their own; neither is a digit.
+        XCTAssertEqual(WeChatForwardRange.digits("十"), "")
+        XCTAssertEqual(WeChatForwardRange.digits("½"), "")
+    }
+
+    func testLeadingZerosCollapseButASingleZeroSurvives() {
+        XCTAssertEqual(WeChatForwardRange.digits("007"), "7")
+        XCTAssertEqual(WeChatForwardRange.digits("0"), "0")
+        XCTAssertEqual(WeChatForwardRange.digits("000"), "0")
+    }
+
+    func testLargeCountsAreNotTruncatedToSixDigits() {
+        for value in ["5000", "1234567890", String(Int.max)] {
+            let digits = WeChatForwardRange.digits(value)
+            XCTAssertEqual(digits, value)
+            XCTAssertTrue(WeChatForwardRange(value: Int(digits) ?? 0).isValid)
+        }
+        XCTAssertEqual(WeChatForwardRange.digits(String(repeating: "0", count: 40) + String(Int.max)), String(Int.max))
+    }
+
+    /// Overflowing input stays visible for validation instead of silently
+    /// exporting a different, truncated count. Int's failable conversion is safe.
+    func testCountsBeyondIntCapacityRemainVisibleAndInvalid() {
+        for value in [String(Int.max) + "0", String(repeating: "9", count: 40)] {
+            let digits = WeChatForwardRange.digits(value)
+            XCTAssertEqual(digits, value)
+            XCTAssertNil(Int(digits))
+            XCTAssertFalse(WeChatForwardRange(value: Int(digits) ?? 0).isValid)
+        }
+    }
+}

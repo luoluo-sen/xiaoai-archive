@@ -1,6 +1,6 @@
 # Xiaoai Archive
 
-Xiaoai Archive is an internal macOS tool for Aike Zhibo. It turns WeChat group chats into time-ordered text kept on the machine, with images, videos and an offline preview, for customer support and work orders.
+Turns WeChat group chats into time-ordered text kept on the machine, with images, videos and an offline preview.
 
 Chat content comes only from files WeChat itself exports. This tool does not read WeChat's database, decrypt it, inject code, or modify WeChat.
 
@@ -18,6 +18,6 @@ Dukou is licensed under the [MIT License](LICENSE). Copies and substantial porti
 
 Third-party components are listed in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md). Sparkle is also MIT; its license is `Resources/Licenses/Sparkle-LICENSE.txt`.
 
-WeChat is a trademark of Tencent. Xiaoai Archive is not affiliated with or endorsed by Tencent.
+WeChat is a trademark of Tencent. This project is not affiliated with or endorsed by Tencent.
 
 简体中文见 [README.md](README.md)。

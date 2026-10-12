@@ -19,6 +19,8 @@ struct WeChatPane: View {
             }
             WeChatInterfaceNotice(authorization: authorization)
 
+            chatListSection
+
             SettingsSection(title: L10n.text("转发内容"), systemImage: "bubble.left.and.bubble.right", spacing: Space.m) {
                 FormRow(L10n.text("群聊")) {
                     HStack(spacing: Space.s) {
@@ -28,7 +30,7 @@ struct WeChatPane: View {
                         Button(L10n.text("读取当前群")) { forward.readCurrentChat() }
                             .buttonStyle(SettingsActionButtonStyle())
                             .fixedSize()
-                            .disabled(forward.isReadingChat)
+                            .disabled(forward.isReadingChat || forward.isReadingChatList)
                     }
                 }
                 FormRow(L10n.text("范围")) {
@@ -167,6 +169,66 @@ struct WeChatPane: View {
             }
         }
         .onAppear { forward.refreshApplications() }
+    }
+
+    private var chatListSection: some View {
+        SettingsSection(title: L10n.text("当前窗口列表"), systemImage: "list.bullet", spacing: Space.m) {
+            HStack(spacing: Space.m) {
+                Text(L10n.text("读取当前微信窗口中已加载的会话名称。"))
+                    .font(Typo.paneCaption).foregroundStyle(Theme.inkSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 0)
+                Button(L10n.text("读取窗口列表")) { forward.readCurrentChatList() }
+                    .buttonStyle(SettingsActionButtonStyle())
+                    .fixedSize()
+                    .disabled(forward.isBusy || forward.isReadingChat || forward.isReadingChatList)
+                    .accessibilityIdentifier("wechat.readChatList")
+            }
+            if forward.isReadingChatList {
+                HStack(spacing: Space.s) {
+                    ProgressView().controlSize(.small)
+                    Text(L10n.text("正在读取窗口列表…")).font(Typo.paneCaption)
+                }
+            }
+            if let error = forward.chatListError {
+                Notice(error, tone: .warn)
+            }
+            if let list = forward.chatList {
+                VStack(alignment: .leading, spacing: Space.s) {
+                    Text(L10n.format("%@ · %d 个已加载会话", listTitle(list.scope), list.entries.count))
+                        .font(Typo.rowTitle)
+                        .accessibilityIdentifier("wechat.chatListCount")
+                    Text(L10n.format("已确认 %d 个群聊，另有 %d 个会话待确认。", list.confirmedGroupCount, list.unverifiedCount))
+                        .font(Typo.paneCaption).foregroundStyle(Theme.inkSecondary)
+                    ForEach(list.entries) { entry in
+                        HStack(alignment: .top, spacing: Space.m) {
+                            Text(verbatim: entry.name)
+                                .font(Typo.paneBody).textSelection(.enabled)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .fixedSize(horizontal: false, vertical: true)
+                            Text(entry.isConfirmedGroup ? L10n.text("群聊（已确认）") : L10n.text("类型待确认"))
+                                .font(Typo.paneCaption)
+                                .foregroundStyle(entry.isConfirmedGroup ? Theme.positive : Theme.inkSecondary)
+                                .fixedSize()
+                        }
+                        .padding(.vertical, Space.xs)
+                    }
+                    Text(L10n.text("仅当前打开会话的群聊类型可确认，其他会话不按名称猜测类型。"))
+                        .font(Typo.paneCaption).foregroundStyle(Theme.inkSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Text(L10n.text("其他会话请在微信中手动展开或滚动后重新读取。"))
+                        .font(Typo.paneCaption).foregroundStyle(Theme.inkSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+    }
+
+    private func listTitle(_ scope: WeChatChatList.Scope) -> String {
+        switch scope {
+        case .conversations: L10n.text("普通会话")
+        case .folded: L10n.text("折叠的聊天")
+        }
     }
 
     private var rangeValidationMessage: String {

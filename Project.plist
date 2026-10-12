@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>AutomaticUpdatesEnabled</key>
+	<false/>
+	<key>DistributionSigningIdentity</key>
+	<string></string>
+	<key>DistributionTeamID</key>
+	<string></string>
+	<key>HomebrewTap</key>
+	<string></string>
+	<key>InstallPath</key>
+	<string>/Applications/xiaoai-archive.app</string>
+	<key>MaintainerName</key>
+	<string>luoluo-sen</string>
+	<key>MaintainerURL</key>
+	<string>https://github.com/luoluo-sen</string>
+	<key>NotaryProfile</key>
+	<string></string>
+	<key>RepositoryURL</key>
+	<string>https://github.com/luoluo-sen/xiaoai-archive</string>
+	<key>SigningIdentity</key>
+	<string>9C2DF9B6EA769F2F0641304094CCC94CB0AC8D61</string>
+	<key>UpdateBaseURL</key>
+	<string>https://luoluo-sen.github.io/xiaoai-archive/</string>
+</dict>
+</plist>

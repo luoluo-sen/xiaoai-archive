@@ -99,16 +99,18 @@ struct GeneralPane: View {
             // Sparkle reads for its daily check, and the version with a way to
             // check right now. 关于 repeats the button beside the version pill.
             SettingsSection(title: L10n.text("软件更新"), systemImage: "arrow.triangle.2.circlepath") {
-                SettingRow(
-                    title: L10n.text("自动检查更新"),
-                    alignment: .center
-                ) {
-                    Toggle(L10n.text("自动检查更新"), isOn: Binding(
-                        get: { updater.automaticallyChecksForUpdates },
-                        set: { updater.automaticallyChecksForUpdates = $0 }
-                    ))
-                    .toggleStyle(SwitchToggleStyle())
-                    .labelsHidden()
+                if updater.isConfigured {
+                    SettingRow(
+                        title: L10n.text("自动检查更新"),
+                        alignment: .center
+                    ) {
+                        Toggle(L10n.text("自动检查更新"), isOn: Binding(
+                            get: { updater.automaticallyChecksForUpdates },
+                            set: { updater.automaticallyChecksForUpdates = $0 }
+                        ))
+                        .toggleStyle(SwitchToggleStyle())
+                        .labelsHidden()
+                    }
                 }
 
                 SettingRow(
@@ -116,9 +118,9 @@ struct GeneralPane: View {
                     detail: AppVersion.short + " (" + AppVersion.build + ")",
                     alignment: .center
                 ) {
-                    Button(L10n.text("检查更新…")) { updater.checkForUpdates() }
+                    Button(updater.actionTitle) { updater.showUpdates() }
                         .buttonStyle(SettingsActionButtonStyle())
-                        .disabled(!updater.canCheckForUpdates)
+                        .disabled(!updater.canPerformAction)
                 }
             }
 

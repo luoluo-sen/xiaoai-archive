@@ -192,7 +192,7 @@ enum QuickForwardFolderDelivery {
     private static func makeStagingDirectory(in folder: URL, checkCancellation: () throws -> Void) throws -> URL {
         while true {
             try checkCancellation()
-            let staging = folder.appendingPathComponent(".dukou-forward-" + UUID().uuidString, isDirectory: true)
+            let staging = folder.appendingPathComponent(".xiaoai-archive-forward-" + UUID().uuidString, isDirectory: true)
             if staging.withUnsafeFileSystemRepresentation({ mkdir($0!, 0o700) }) == 0 { return staging }
             let code = errno
             guard code == EEXIST else { throw posixError(code, url: staging) }

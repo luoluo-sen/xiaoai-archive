@@ -3,13 +3,14 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-APP="${1:-$ROOT/dist/Dukou.app}"
-OUTPUT="${2:-$ROOT/dist/Dukou.dmg}"
+APP_NAME="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleName' "$ROOT/Resources/Info.plist")"
+APP="${1:-$ROOT/dist/$APP_NAME.app}"
+OUTPUT="${2:-$ROOT/dist/$APP_NAME.dmg}"
 VERSION="${3:-$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Contents/Info.plist")}"
 BACKGROUND="${4:-$ROOT/Resources/DMG/background.png}"
-VOLUME_NAME="Dukou $VERSION"
+VOLUME_NAME="$APP_NAME $VERSION"
 DMG_ROOT="$ROOT/dist/dmg-root"
-RW_DMG="$ROOT/dist/Dukou-$VERSION-rw.dmg"
+RW_DMG="$ROOT/dist/$APP_NAME-$VERSION-rw.dmg"
 MOUNT_POINT=""
 
 if [ ! -d "$APP" ]; then
@@ -32,7 +33,7 @@ trap cleanup EXIT
 rm -rf "$DMG_ROOT"
 rm -f "$RW_DMG" "$OUTPUT"
 mkdir -p "$DMG_ROOT/.background"
-ditto "$APP" "$DMG_ROOT/Dukou.app"
+ditto "$APP" "$DMG_ROOT/$APP_NAME.app"
 ln -s /Applications "$DMG_ROOT/Applications"
 cp "$BACKGROUND" "$DMG_ROOT/.background/background.png"
 
@@ -75,7 +76,7 @@ tell application "Finder"
         set shows icon preview of viewOptions to false
         set background picture of viewOptions to ¬
             (POSIX file "$MOUNT_POINT/.background/background.png" as alias)
-        set position of item "Dukou.app" to {195, 176}
+        set position of item "$APP_NAME.app" to {195, 176}
         set position of item "Applications" to {456, 176}
         update without registering applications
         delay 2

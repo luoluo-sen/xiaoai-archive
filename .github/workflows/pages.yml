@@ -1,7 +1,7 @@
-name: Deploy update feed
+name: Deploy xiaoai-archive site
 
-# The imported site/appcast.xml still lists Dukou releases. Do not publish it
-# until this repository has its own signed feed and installers.
+# Publish only on explicit dispatch. Upstream history is archived outside site/.
+# Automatic updates remain disabled until this project has signed installers.
 on:
   workflow_dispatch:
 

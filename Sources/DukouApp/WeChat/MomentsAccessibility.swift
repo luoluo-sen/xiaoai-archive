@@ -98,7 +98,7 @@ final class MomentsAccessibility {
 
     func capture(_ preset: MomentsForwardPreset, inbox: Inbox) throws -> MomentsCapture {
         guard preset.isValid else { throw MomentsAutomationError.empty }
-        let work = FileManager.default.temporaryDirectory.appendingPathComponent("Dukou-Moments-" + UUID().uuidString, isDirectory: true)
+        let work = FileManager.default.temporaryDirectory.appendingPathComponent("xiaoai-archive-Moments-" + UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: work, withIntermediateDirectories: true)
         defer {
             cleanup()

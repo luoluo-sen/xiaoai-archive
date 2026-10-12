@@ -9,6 +9,9 @@ final class WeChatQuickForward: ObservableObject {
     @Published private(set) var applications: [RunningApp] = []
     @Published private(set) var isBusy = false
     @Published private(set) var isReadingChat = false
+    @Published private(set) var isReadingChatList = false
+    @Published private(set) var chatList: WeChatChatList?
+    @Published private(set) var chatListError: String?
     @Published private(set) var status: String? {
         didSet { if isBusy, let status { hud.update(status: status) } }
     }
@@ -54,7 +57,7 @@ final class WeChatQuickForward: ObservableObject {
     }
 
     var canRun: Bool {
-        !isBusy && !isReadingChat && !otherAutomationIsBusy() && !WeChatForwardPreset.normalizedChat(draft.chat).isEmpty && draft.range.isAvailableForAutomation &&
+        !isBusy && !isReadingChat && !isReadingChatList && !otherAutomationIsBusy() && !WeChatForwardPreset.normalizedChat(draft.chat).isEmpty && draft.range.isAvailableForAutomation &&
         (draft.destinationFolder.map(\.isFileURL) ?? applications.contains { $0.id == draft.targetBundleIdentifier })
     }
     func refreshApplications() {
@@ -137,7 +140,7 @@ final class WeChatQuickForward: ObservableObject {
     private func persist() { if let data = try? JSONEncoder().encode(stored) { defaults.set(data, forKey: Self.key) } }
 
     func readCurrentChat() {
-        guard !isBusy, !isReadingChat, !otherAutomationIsBusy() else { return }
+        guard !isBusy, !isReadingChat, !isReadingChatList, !otherAutomationIsBusy() else { return }
         authorization.refresh()
         guard authorization.isTrusted else { authorization.guideIfNeeded(); return }
         isReadingChat = true; error = nil
@@ -152,6 +155,29 @@ final class WeChatQuickForward: ObservableObject {
         }
     }
 
+    func readCurrentChatList() {
+        guard !isBusy, !isReadingChat, !isReadingChatList, !otherAutomationIsBusy() else { return }
+        chatList = nil
+        chatListError = nil
+        authorization.refresh()
+        guard authorization.isTrusted else {
+            chatListError = WeChatChatListReader.Failure.permissionRequired.localizedDescription
+            return
+        }
+        isReadingChatList = true
+        Task {
+            defer { isReadingChatList = false }
+            do {
+                let result: WeChatChatList = try await withCheckedThrowingContinuation { continuation in
+                    Self.worker.async { continuation.resume(with: Result { try WeChatChatListReader.read() }) }
+                }
+                chatList = result
+            } catch {
+                chatListError = error.localizedDescription
+            }
+        }
+    }
+
     func cancel() {
         // The HUD stays clickable for its fade-out, which starts before
         // `isBusy` clears. Without this, a late click on 取消 overwrote the
@@ -162,7 +188,7 @@ final class WeChatQuickForward: ObservableObject {
     }
 
     func start(_ saved: WeChatForwardPreset? = nil) {
-        guard !isBusy, !isReadingChat, !otherAutomationIsBusy() else { return }
+        guard !isBusy, !isReadingChat, !isReadingChatList, !otherAutomationIsBusy() else { return }
         if let saved { draft = saved }
         guard draft.range.unit == .messages else {
             status = nil
@@ -238,7 +264,7 @@ final class WeChatQuickForward: ObservableObject {
         do {
             try token.check()
             guard Date().timeIntervalSince(requestedAt) <= BatchIntent.freshnessWindow else { throw WeChatAutomationError.focusChanged }
-            guard let inbox = model.inbox else { throw WeChatAutomationError.receiptTimeout }
+            guard let inbox = model.inbox else { throw InboxError.inboxUnavailable }
             if preset.destinationFolder == nil {
                 guard let targetPID, NSRunningApplication(processIdentifier: targetPID)?.bundleIdentifier == preset.targetBundleIdentifier else {
                     throw AutoPaste.Failure.didNotBecomeActive(name: preset.targetName)

@@ -1,8 +1,7 @@
 #!/usr/bin/env swift
 // Turns the Markdown release notes in Resources/ReleaseNotes into the two
-// published forms. The same file is shared by Charker, Dukou and AutoCodeBar;
-// everything app-specific is read from Resources/Info.plist (CFBundleName,
-// SUFeedURL) or from the appcast, apart from the brand colours below.
+// published forms. The product name comes from Resources/Info.plist;
+// repository and publication URLs come from the root Project.plist.
 //
 //   release-notes.swift sparkle <version> <build> <yyyy-mm-dd> <out-dir>
 //       <App>-<version>.html and <App>-<version>.zh.html for Sparkle's update
@@ -37,20 +36,32 @@ let info: [String: Any] = {
     return plist
 }()
 let appName = info["CFBundleName"] as? String ?? { fail("Info.plist has no CFBundleName") }()
+let project: [String: Any] = {
+    let url = root.appendingPathComponent("Project.plist")
+    guard let data = try? Data(contentsOf: url),
+          let plist = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any]
+    else { fail("cannot read \(url.path)") }
+    return plist
+}()
+let repositoryURL: String = {
+    guard let value = project["RepositoryURL"] as? String,
+          let url = URL(string: value), url.scheme == "https", url.host != nil else {
+        fail("Project.plist must provide an HTTPS RepositoryURL")
+    }
+    return value
+}()
 /// GitHub Pages serves the notes and the history page next to the appcast.
 let siteURL: String = {
-    guard let feed = info["SUFeedURL"] as? String, let url = URL(string: feed) else {
-        fail("Info.plist has no SUFeedURL")
+    guard let value = project["UpdateBaseURL"] as? String,
+          let url = URL(string: value), url.scheme == "https", url.host != nil,
+          value.hasSuffix("/") else {
+        fail("Project.plist must provide an HTTPS UpdateBaseURL ending in /")
     }
-    return url.deletingLastPathComponent().absoluteString
+    return value
 }()
 
 /// The "New" colour doubles as the accent, matching each app's site.
-let brand: (light: String, dark: String) = [
-    "Charker": ("#0a78a0", "#5bcef5"),
-    "Dukou": ("#16865f", "#58d8a8"),
-    "AutoCodeBar": ("#0f8175", "#54d6c8"),
-][appName] ?? ("#0a78a0", "#5bcef5")
+let brand: (light: String, dark: String) = ("#16865f", "#58d8a8")
 
 enum Language: String, CaseIterable {
     case en, zh
@@ -447,11 +458,7 @@ func releases(fromAppcast url: URL) -> (list: [Release], releasesPage: String) {
               let year = Int(parts[3]) else { return nil }
         return Release(version: version, build: build, year: year, month: month, day: day)
     }
-    // "https://github.com/<owner>/<repo>/releases/download/<tag>/<file>"
-    let enclosure = (try? document.nodes(forXPath: "//item/enclosure/@url"))?.first?.stringValue ?? ""
-    let releasesPage = enclosure.range(of: "/releases/download/").map {
-        String(enclosure[..<$0.lowerBound]) + "/releases"
-    } ?? siteURL
+    let releasesPage = repositoryURL + "/releases"
     let sorted = parsed.sorted {
         $0.version.compare($1.version, options: .numeric) == .orderedDescending
     }

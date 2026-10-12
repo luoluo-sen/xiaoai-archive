@@ -89,9 +89,7 @@ final class AppModel: ObservableObject {
     /// of — extending from whichever member happened to hash first picked a
     /// different range on every click.
     var selectionAnchor: UUID?
-    /// Set only for conditions the user can act on — a missing group container
-    /// is a build fault, but they still deserve to see it rather than an empty
-    /// shelf that never fills.
+    /// A failed inbox access must be visible rather than an empty shelf.
     @Published private(set) var inboxFailure: String?
 
     /// Raised once per batch that a rescan finds for the first time, carrying
@@ -104,7 +102,7 @@ final class AppModel: ObservableObject {
     let didDragOut = PassthroughSubject<Void, Never>()
 
     /// A share that never became a batch. The extension has no interface to
-    /// report one in, so it leaves the message in the app group and this is
+    /// report one in, so it leaves the message in the inbox and this is
     /// where the app picks it up — once, on the scan that follows.
     let didFailToReceive = PassthroughSubject<ShareFailure, Never>()
 
@@ -137,6 +135,7 @@ final class AppModel: ObservableObject {
         do {
             let inbox = try Inbox.resolve()
             try inbox.prepareDirectories()
+            _ = try FileManager.default.contentsOfDirectory(at: inbox.ready, includingPropertiesForKeys: nil)
             self.inbox = inbox
             reader = InboxReader(inbox: inbox)
             // Debris from an extension that was killed mid-copy. Safe here

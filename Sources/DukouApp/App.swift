@@ -11,24 +11,15 @@ import SwiftUI
 /// `showDockIcon` says so. The one window Dukou has is real, user-visible
 /// functionality of its own, and AppKit — not SwiftUI — decides when it appears.
 @main
-struct DukouMainApp: App {
-    @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
-
-    /// An empty placeholder: `App` requires a scene, and Dukou's one window is
-    /// opened by `SettingsWindowController` instead. With the Dock icon on,
-    /// Dukou owns a menu bar, and the stock 设置… and 关于 items there would
-    /// open this empty scene and a bare About panel; both go to the real window.
-    var body: some Scene {
-        Settings { EmptyView() }
-            .commands {
-                CommandGroup(replacing: .appInfo) {
-                    Button(L10n.text("关于 Dukou…")) { appDelegate.openMainWindow(.about) }
-                }
-                CommandGroup(replacing: .appSettings) {
-                    Button(L10n.text("设置…")) { appDelegate.openMainWindow(.general) }
-                        .keyboardShortcut(",")
-                }
-            }
+@MainActor
+enum DukouMainApp {
+    static func main() {
+        let application = NSApplication.shared
+        let delegate = AppDelegate()
+        application.delegate = delegate
+        withExtendedLifetime(delegate) {
+            application.run()
+        }
     }
 }
 
@@ -85,6 +76,47 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
     }
 
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        let menu = NSMenu()
+        let appMenu = NSMenu(title: "xiaoai-archive")
+        menu.addItem(withTitle: "xiaoai-archive", action: nil, keyEquivalent: "").submenu = appMenu
+        appMenu.addItem(withTitle: L10n.text("关于 xiaoai-archive…"), action: #selector(showAbout(_:)), keyEquivalent: "").target = self
+        appMenu.addItem(withTitle: L10n.text("设置…"), action: #selector(showSettings(_:)), keyEquivalent: ",").target = self
+        appMenu.addItem(.separator())
+        let services = NSMenu(title: L10n.text("服务"))
+        appMenu.addItem(withTitle: services.title, action: nil, keyEquivalent: "").submenu = services
+        NSApp.servicesMenu = services
+        appMenu.addItem(.separator())
+        appMenu.addItem(withTitle: L10n.text("隐藏 xiaoai-archive"), action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
+        appMenu.addItem(withTitle: L10n.text("隐藏其他"), action: #selector(NSApplication.hideOtherApplications(_:)), keyEquivalent: "h")
+            .keyEquivalentModifierMask = [.command, .option]
+        appMenu.addItem(withTitle: L10n.text("全部显示"), action: #selector(NSApplication.unhideAllApplications(_:)), keyEquivalent: "")
+        appMenu.addItem(.separator())
+        appMenu.addItem(withTitle: L10n.text("退出 xiaoai-archive"), action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+
+        let editMenu = NSMenu(title: L10n.text("编辑"))
+        menu.addItem(withTitle: editMenu.title, action: nil, keyEquivalent: "").submenu = editMenu
+        editMenu.addItem(withTitle: L10n.text("撤销"), action: Selector(("undo:")), keyEquivalent: "z")
+        editMenu.addItem(withTitle: L10n.text("重做"), action: Selector(("redo:")), keyEquivalent: "Z")
+        editMenu.addItem(.separator())
+        editMenu.addItem(withTitle: L10n.text("剪切"), action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+        editMenu.addItem(withTitle: L10n.text("拷贝"), action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        editMenu.addItem(withTitle: L10n.text("粘贴"), action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        editMenu.addItem(withTitle: L10n.text("全选"), action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+
+        let windowMenu = NSMenu(title: L10n.text("窗口"))
+        menu.addItem(withTitle: windowMenu.title, action: nil, keyEquivalent: "").submenu = windowMenu
+        windowMenu.addItem(withTitle: L10n.text("最小化"), action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")
+        windowMenu.addItem(withTitle: L10n.text("缩放"), action: #selector(NSWindow.performZoom(_:)), keyEquivalent: "")
+        windowMenu.addItem(.separator())
+        windowMenu.addItem(withTitle: L10n.text("前置全部窗口"), action: #selector(NSApplication.arrangeInFront(_:)), keyEquivalent: "")
+        NSApp.windowsMenu = windowMenu
+        NSApp.mainMenu = menu
+    }
+
+    @objc private func showSettings(_ sender: Any?) { openMainWindow(.general) }
+    @objc private func showAbout(_ sender: Any?) { openMainWindow(.about) }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Two copies would race for the same inbox and stack two shelves on
         // screen. The one already running wins.
@@ -134,7 +166,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         moments.openSettings = { [weak self] tab in self?.openMainWindow(tab) }
         self.moments = moments
         wechat.otherAutomationIsBusy = { [weak moments] in moments?.isBusy ?? false }
-        moments.otherAutomationIsBusy = { [weak wechat] in (wechat?.isBusy ?? false) || (wechat?.isReadingChat ?? false) }
+        moments.otherAutomationIsBusy = { [weak wechat] in (wechat?.isBusy ?? false) || (wechat?.isReadingChat ?? false) || (wechat?.isReadingChatList ?? false) }
         runner.reservedFrame = { [weak wechat, weak moments] in moments?.hudFrame ?? wechat?.hudFrame }
 
         // One place decides what an arriving batch means; the shelf and the

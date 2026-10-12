@@ -2,15 +2,32 @@ import AppKit
 import DukouCore
 import SwiftUI
 
-/// The links the About pane offers. Constants, because a typo in a URL is not
-/// something a user can report usefully.
+/// Project metadata supplied by the assembled app's Info.plist.
 enum AppLinks {
-    static let github = "https://github.com/qzz0518/Dukou"
-    static let x = "https://x.com/zerah_eth"
+    static let github = requiredURL("XARepositoryURL")
+    static let maintainer = requiredURL("XAMaintainerURL")
+    static let name = requiredString("XAMaintainerName")
+    static let releases = github.appendingPathComponent("releases")
+    static let issues = github.appendingPathComponent("issues")
 
-    static func open(_ urlString: String) {
-        guard let url = URL(string: urlString) else { return }
+    static func open(_ url: URL) {
         NSWorkspace.shared.open(url)
+    }
+
+    private static func requiredString(_ key: String) -> String {
+        guard let value = Bundle.main.object(forInfoDictionaryKey: key) as? String,
+              !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            preconditionFailure("Missing required project metadata: \(key)")
+        }
+        return value
+    }
+
+    private static func requiredURL(_ key: String) -> URL {
+        let value = requiredString(key)
+        guard let url = URL(string: value), url.scheme == "https", url.host != nil else {
+            preconditionFailure("Invalid HTTPS project URL: \(key)")
+        }
+        return url
     }
 }
 

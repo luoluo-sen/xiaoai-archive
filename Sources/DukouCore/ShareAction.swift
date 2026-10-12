@@ -83,7 +83,7 @@ public enum ShareAction: String, Codable, Sendable, CaseIterable {
     /// defaults in `Scripts/share-slots.sh`.
     public var entryTitle: String {
         switch self {
-        case .shelf: return L10n.text("暂存到渡口")
+        case .shelf: return L10n.text("暂存到 xiaoai-archive")
         case .codex, .claude: return L10n.format("发给 %@", targetDisplayName)
         case .clipboard: return L10n.text("复制到剪贴板")
         case .custom: return L10n.text("发送到自定义")

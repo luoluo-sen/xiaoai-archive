@@ -13,7 +13,7 @@ enum WeChatAutomationError: Error, LocalizedError {
     var errorDescription: String? {
         switch self {
         case .notRunning: L10n.text("请先打开并登录微信。")
-        case .interfaceHidden: L10n.text("微信没有向这个账号开放界面控件，快捷转发用不了，重装或重新授权无效。请在微信里手动多选后转发到 Dukou。")
+        case .interfaceHidden: L10n.text("微信没有向这个账号开放界面控件，快捷转发用不了，重装或重新授权无效。请在微信里手动多选后转发到 xiaoai-archive。")
         case .wrongChat: L10n.text("没有找到唯一匹配的群聊。请先在微信中打开这个群，再重新执行。")
         case .busyChat: L10n.text("请先关闭微信的聊天记录窗口，或退出正在进行的多选、转发。")
         case .focusChanged: L10n.text("前台应用或群聊发生了变化，已停止微信操作。")
@@ -21,9 +21,9 @@ enum WeChatAutomationError: Error, LocalizedError {
         case .noMessages: L10n.text("这个时间范围内没有消息。")
         case .selection: L10n.text("无法准确选中这一批消息，已停止。请缩小范围后重试。")
         case .loading: L10n.text("微信消息列表尚未稳定。请等待加载完成后重试。")
-        case .screenRecording: L10n.text("这个转发界面需要识别按钮位置。请在系统设置中为渡口开启屏幕录制权限后重试。")
+        case .screenRecording: L10n.text("这个转发界面需要识别按钮位置。请在系统设置中为 xiaoai-archive 开启屏幕录制权限后重试。")
         case .unsupportedLayout: L10n.text("没有定位到“转发到其他应用”按钮，已停止。请保持微信转发窗口完整可见。")
-        case .missingShare: L10n.text("没有找到「暂存到渡口」分享入口。请在设置的「入口」中启用它。")
+        case .missingShare: L10n.text("没有找到「暂存到 xiaoai-archive」分享入口。请在设置的「入口」中启用它。")
         case .ambiguousReceipt: L10n.text("同时收到了多次分享，无法确认本次文件，已停止自动粘贴。")
         case .receiptTimeout: L10n.text("等待微信导出超时。已收到的文件会保留在暂存架。")
         case .invalidArchive: L10n.text("微信导出的文件为空或无法完整读取，文件已保留。")
@@ -1373,7 +1373,7 @@ final class WeChatAccessibility {
         // in cannot be mistaken for the label being searched for.
         let crop = CGRect(x: floor(sheet.rect.minX), y: floor(sheet.rect.minY),
                           width: floor(sheet.rect.width * 0.45), height: floor(sheet.rect.height * 0.78))
-        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("dukou-control-\(UUID().uuidString)")
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("xiaoai-archive-control-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         defer { try? FileManager.default.removeItem(at: folder) }
         let url = folder.appendingPathComponent("control.png")
@@ -1435,6 +1435,9 @@ final class WeChatAccessibility {
             try readyIDs(at: ready)
         }
         let baseline = try ids()
+        let failures = ready.deletingLastPathComponent()
+            .appendingPathComponent(ShareFailure.directoryName, isDirectory: true)
+        let failureBaseline = Set(try FileManager.default.contentsOfDirectory(at: failures, includingPropertiesForKeys: nil))
         let installed = Bundle(url: shelfExtension)
         guard installed?.bundleIdentifier == "dev.dukou.Dukou.Share", installed?.object(forInfoDictionaryKey: "DKShareAction") as? String == "shelf" else { throw WeChatAutomationError.missingShare }
         try press(try waitControl("合并转发"))
@@ -1463,14 +1466,22 @@ final class WeChatAccessibility {
         repeat {
             try frontmost()
             let menu = try scan()
-            share = control("暂存到渡口", in: menu) ?? control("添加到 Dukou", in: menu) ?? control("Stash in Dukou", in: menu)
+            share = control("暂存到 xiaoai-archive", in: menu) ?? control("添加到 xiaoai-archive", in: menu) ?? control("Stash in xiaoai-archive", in: menu)
             if share != nil { break }
             try pause(0.02)
         } while clock() < deadline
         guard let share else { throw WeChatAutomationError.missingShare }
         try press(share)
+        progress(L10n.text("正在等待微信导出文件…"))
         let receiptDeadline = clock() + 45
         repeat {
+            let failureFiles = try FileManager.default.contentsOfDirectory(at: failures, includingPropertiesForKeys: nil)
+            for file in failureFiles where file.pathExtension == "json" && !failureBaseline.contains(file) {
+                let failure = try BatchManifest.decoder().decode(ShareFailure.self, from: Data(contentsOf: file))
+                guard failure.action == .shelf else { continue }
+                try FileManager.default.removeItem(at: file)
+                throw failure
+            }
             let candidates = try ids().subtracting(baseline)
             guard candidates.count <= 1 else { throw WeChatAutomationError.ambiguousReceipt }
             if let id = candidates.first {
@@ -1514,7 +1525,7 @@ final class WeChatAccessibility {
             "locator": locator, "visualMilliseconds": visualMilliseconds, "lastNodeCount": lastNodeCount,
             "scanTruncated": scanTruncated, "controlFailure": controlFailure ?? [:],
             "wechatVersion": app.bundleURL.flatMap { Bundle(url: $0)?.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String } ?? "unknown"]
-        let folder = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs/Dukou/WeChat")
+        let folder = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs/xiaoai-archive/WeChat")
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         if let data = try? JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]) {
             try? data.write(to: folder.appendingPathComponent("latest.json"), options: .atomic)
@@ -1542,8 +1553,9 @@ final class WeChatAccessibility {
         while selectedCount < range.value {
             try verifyChat()
             let limit = min(100, range.value - selectedCount)
-            progress(L10n.format("正在选择并导出消息 · 已完成约 %d 条", count))
+            progress(L10n.format("正在选择消息 · 已导出约 %d 条", count))
             let selected = try selectBatch(limit: limit, start: start, latestPage: selectedCount == 0 ? latestPage : nil)
+            progress(L10n.format("已选中 %d 条消息，正在导出…", selected.count))
             let directory = try nativeExport(ready: ready, shelfExtension: shelfExtension)
             start = .resume(selected.checkpoint, ordinal: selected.count)
             phase = "archive"

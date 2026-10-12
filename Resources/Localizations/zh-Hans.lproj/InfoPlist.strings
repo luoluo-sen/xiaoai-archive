@@ -1,2 +1,3 @@
-"CFBundleName" = "Dukou";
+"CFBundleName" = "xiaoai-archive";
 "NSHumanReadableCopyright" = "本地文件中转工具，不解压也不上传分享内容。";
+"NSDownloadsFolderUsageDescription" = "读取和暂存微信分享的文件，以整理并保存聊天记录。";

@@ -1,3 +1,4 @@
 /* The name shown in the system Share menu. */
-"CFBundleDisplayName" = "Stash in Dukou";
-"CFBundleName" = "Dukou";
+"CFBundleDisplayName" = "Stash in xiaoai-archive";
+"CFBundleName" = "xiaoai-archive";
+"NSDownloadsFolderUsageDescription" = "Read and stage files shared by WeChat to organize and save chat archives.";

@@ -64,26 +64,18 @@ final class ShareViewController: NSViewController {
 
         // Resolved before the emptiness check so that even a share with nothing
         // in it has somewhere to leave its report.
-        let inbox = try? Inbox.resolve()
+        let inbox: Inbox
+        do {
+            inbox = try Inbox.resolve()
+        } catch {
+            fail(error, action: action, inbox: nil, context: context)
+            return
+        }
         guard !sources.isEmpty else {
             fail(InboxError.emptyShare, action: action, inbox: inbox, context: context)
             return
         }
-        guard let inbox else {
-            fail(
-                InboxError.containerUnavailable(identifier: AppGroup.identifier),
-                action: action,
-                inbox: nil,
-                context: context
-            )
-            return
-        }
-        // Two different failures, two different sentences. These used to share
-        // one `guard`, so a staging directory that could not be created — a full
-        // disk, a permissions problem under `Inbox/Staging` — was reported as
-        // 「无法访问共享容器」, pointing the only diagnostic channel this process
-        // has at the entitlement, which is the one thing that demonstrably
-        // worked.
+        // Preserve the filesystem error if staging cannot be created.
         let staging: BatchStaging
         do {
             staging = try BatchStaging.create(in: inbox)
@@ -207,7 +199,7 @@ final class ShareViewController: NSViewController {
     }
 
     /// The only way this process can report anything: leave the message in the
-    /// app group and start the app, which has a screen to say it on.
+    /// inbox and start the app, which has a screen to say it on.
     ///
     /// `cancelRequest` rather than `completeRequest` because nothing was
     /// delivered; the host is entitled to know its share did not happen, and

@@ -45,7 +45,7 @@ final class ShareEntryProbe: ObservableObject {
     /// user just asked for. The read-back in `setEnabled` replaces it with
     /// what pkd actually did, so a refused election animates straight back.
     @Published private(set) var requested: [ShareAction: Bool] = [:]
-    private var isRefreshing = false
+    @Published private var isRefreshing = false
 
     func state(of action: ShareAction) -> ShareEntryState? { states[action] }
 
@@ -57,6 +57,10 @@ final class ShareEntryProbe: ObservableObject {
     }
 
     var hasUnregisteredEntry: Bool { states.values.contains(.unregistered) }
+
+    var hasEnabledEntry: Bool {
+        !isRefreshing && switching.isEmpty && states.values.contains(.enabled)
+    }
 
     /// Re-reads every entry. Called when the pane appears and again on every
     /// activation: the entries can still be changed in System Settings, and the

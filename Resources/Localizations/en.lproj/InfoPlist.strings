@@ -1,2 +1,3 @@
-"CFBundleName" = "Dukou";
+"CFBundleName" = "xiaoai-archive";
 "NSHumanReadableCopyright" = "A local hand-off tool. It never unpacks or uploads what you share.";
+"NSDownloadsFolderUsageDescription" = "Read and stage files shared by WeChat to organize and save chat archives.";

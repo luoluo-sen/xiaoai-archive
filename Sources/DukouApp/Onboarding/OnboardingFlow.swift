@@ -144,7 +144,14 @@ struct OnboardingFlow: View {
             ShareEntryList(probe: probe, spacing: Space.m)
                 .padding(.top, 20)
 
+            Text(L10n.text("请先启用至少一个分享入口。快捷微信转发需要「暂存到 xiaoai-archive」。"))
+                .font(Typo.paneCaption)
+                .foregroundStyle(Theme.inkSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.top, 12)
+
             StepFooter(next: (L10n.text("继续"), { step = .shelf }))
+                .disabled(!probe.hasEnabledEntry)
                 .padding(.top, 20)
         }
     }
@@ -152,8 +159,8 @@ struct OnboardingFlow: View {
     private var shelfStep: some View {
         VStack(alignment: .leading, spacing: 0) {
             StepTitle(
-                title: L10n.text("暂存到渡口，再拖到任何地方"),
-                subtitle: L10n.text("用「暂存到渡口」转发过来的文件，都停在这个方块上。")
+                title: L10n.text("暂存到 xiaoai-archive，再拖到任何地方"),
+                subtitle: L10n.text("用「暂存到 xiaoai-archive」转发过来的文件，都停在这个方块上。")
             )
 
             VStack(alignment: .leading, spacing: 16) {
@@ -182,7 +189,7 @@ struct OnboardingFlow: View {
 
     private var permissionsStep: some View {
         VStack(alignment: .leading, spacing: 0) {
-            StepTitle(title: L10n.text("让 Dukou 代你按 ⌘V"))
+            StepTitle(title: L10n.text("让 xiaoai-archive 代你按 ⌘V"))
 
             ChecklistRow(
                 done: authorization.isTrusted,
@@ -196,7 +203,7 @@ struct OnboardingFlow: View {
             }
             .padding(.top, 26)
 
-            Text(L10n.text("可以先跳过，第一次转发失败时 Dukou 会再引导一次。"))
+            Text(L10n.text("可以先跳过，第一次转发失败时 xiaoai-archive 会再引导一次。"))
                 .font(Typo.paneCaption)
                 .foregroundStyle(Theme.inkTertiary)
                 .padding(.top, 14)
@@ -222,26 +229,34 @@ struct OnboardingFlow: View {
                 Circle()
                     .fill(Theme.positiveSoft)
                     .frame(width: 64, height: 64)
-                Image(systemName: "checkmark")
+                Image(systemName: probe.hasEnabledEntry ? "checkmark" : "arrow.left")
                     .font(.system(size: 26, weight: .bold))
                     .foregroundStyle(Theme.accent)
             }
             .accessibilityHidden(true)
 
-            Text(L10n.text("好了"))
+            Text(probe.hasEnabledEntry ? L10n.text("好了") : L10n.text("入口尚未启用"))
                 .font(.system(size: 40, weight: .bold))
                 .foregroundStyle(Theme.ink)
                 .padding(.top, 24)
 
-            Text(L10n.text("去微信多选聊天记录 → 转发到其他应用，就能看到这些入口了。"))
+            Text(probe.hasEnabledEntry
+                 ? L10n.text("去微信多选聊天记录 → 转发到其他应用，就能看到这些入口了。")
+                 : L10n.text("请先启用至少一个分享入口。快捷微信转发需要「暂存到 xiaoai-archive」。"))
                 .font(.system(size: 15))
                 .foregroundStyle(Theme.inkSecondary)
                 .frame(maxWidth: 520, alignment: .leading)
                 .fixedSize(horizontal: false, vertical: true)
                 .padding(.top, 12)
 
+            if !probe.hasEnabledEntry {
+                Button(L10n.text("返回入口")) { step = .entries }
+                    .buttonStyle(GhostButtonStyle())
+                    .padding(.top, 16)
+            }
             Button(L10n.text("完成")) { finish() }
                 .buttonStyle(InkButtonStyle())
+                .disabled(!probe.hasEnabledEntry)
                 .keyboardShortcut(.defaultAction)
                 .padding(.top, 34)
 
@@ -497,7 +512,7 @@ private struct PermissionArt: View {
             Image(systemName: "hand.raised.slash")
                 .font(.system(size: 20, weight: .medium))
                 .foregroundStyle(Theme.accent)
-            Text(L10n.text("辅助功能不会弹系统授权框，需要把 Dukou 拖进列表；授权后立即生效，不必重启。"))
+            Text(L10n.text("辅助功能需要把 xiaoai-archive 加入系统列表并打开开关；更新应用后可能需要重新添加授权并重启。"))
                 .font(.system(size: 13))
                 .foregroundStyle(Theme.inkSecondary)
                 .fixedSize(horizontal: false, vertical: true)

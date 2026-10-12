@@ -54,7 +54,7 @@ struct HistoryPane: View {
             Text(L10n.text("还没有记录"))
                 .font(Typo.paneBodyStrong)
                 .foregroundStyle(Theme.ink)
-            Text(L10n.text("从微信转发到任意一个 Dukou 入口后，这里会列出来。"))
+            Text(L10n.text("从微信转发到任意一个 xiaoai-archive 入口后，这里会列出来。"))
                 .font(Typo.paneCaption)
                 .foregroundStyle(Theme.inkSecondary)
                 .multilineTextAlignment(.center)

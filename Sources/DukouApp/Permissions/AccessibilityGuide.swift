@@ -235,7 +235,7 @@ private struct GuideCard: View {
     @ObservedObject var model: GuideModel
 
     private var instruction: AttributedString {
-        let markdown = L10n.text("把 **Dukou** 拖进上方列表，然后打开它的开关")
+        let markdown = L10n.text("把 **xiaoai-archive** 拖进上方列表，然后打开它的开关")
         return (try? AttributedString(markdown: markdown)) ?? AttributedString(markdown)
     }
 
@@ -275,7 +275,7 @@ private struct GuideCard: View {
                         .resizable()
                         .frame(width: 24, height: 24)
                         .accessibilityHidden(true)
-                    Text(verbatim: "Dukou")
+                    Text(verbatim: "xiaoai-archive")
                         .font(.system(size: 13))
                     Spacer(minLength: 0)
                 }
@@ -286,7 +286,7 @@ private struct GuideCard: View {
                     in: RoundedRectangle(cornerRadius: 8, style: .continuous)
                 )
                 .overlay(AppDragHandle(began: model.dragBegan, ended: model.dragEnded))
-                .accessibilityLabel(Text(L10n.text("Dukou 应用，拖到辅助功能列表")))
+                .accessibilityLabel(Text(L10n.text("xiaoai-archive 应用，拖到辅助功能列表")))
             }
         }
         .padding(.leading, 10)

@@ -207,7 +207,7 @@ final class ActionRunner {
     }
 
     /// A share the extension could not complete. It has no interface of its own
-    /// any more, so the message travels through the app group and is said here —
+    /// any more, so the message travels through the inbox and is said here —
     /// with no action, because there is nothing on disk left to act on.
     func report(_ failure: ShareFailure) {
         toast.show(

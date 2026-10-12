@@ -21,7 +21,7 @@ enum AutoPaste {
             case .notInstalled(let name):
                 return L10n.format("这台 Mac 上没有找到 %@。", name)
             case .notTrusted:
-                return L10n.text("Dukou 还没有「辅助功能」权限，没法代你按 ⌘V。")
+                return L10n.text("xiaoai-archive 还没有「辅助功能」权限，没法代你按 ⌘V。")
             case .didNotBecomeActive(let name):
                 return L10n.format("%@ 没有切到前台，已经放弃自动粘贴。", name)
             case .eventCreationFailed:

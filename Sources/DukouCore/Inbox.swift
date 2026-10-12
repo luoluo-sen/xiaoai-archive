@@ -3,7 +3,7 @@ import Foundation
 /// The shared inbox on disk.
 ///
 /// ```text
-/// <group container>/Inbox/
+/// ~/Downloads/xiaoai-archive/Inbox/
 ///   Staging/<batch-id>.partial/   ← only the extension writes here
 ///     items/<item-id>/<display name>
 ///     manifest.json.partial
@@ -25,15 +25,17 @@ public struct Inbox: Sendable, Hashable {
     }
 
     public static func resolve(
-        appGroupIdentifier: String = AppGroup.identifier,
         fileManager: FileManager = .default
     ) throws -> Inbox {
-        guard let container = fileManager.containerURL(
-            forSecurityApplicationGroupIdentifier: appGroupIdentifier
-        ) else {
-            throw InboxError.containerUnavailable(identifier: appGroupIdentifier)
-        }
-        return Inbox(root: container.appendingPathComponent("Inbox", isDirectory: true))
+        // A sandboxed extension's Downloads URL may go through its container's
+        // symlink. Resolve it so both processes watch the same user directory.
+        let downloads = try fileManager.url(
+            for: .downloadsDirectory, in: .userDomainMask,
+            appropriateFor: nil, create: false
+        ).resolvingSymlinksInPath()
+        return Inbox(root: downloads
+            .appendingPathComponent("xiaoai-archive", isDirectory: true)
+            .appendingPathComponent("Inbox", isDirectory: true))
     }
 
     public var staging: URL { root.appendingPathComponent("Staging", isDirectory: true) }

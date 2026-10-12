@@ -130,7 +130,7 @@ enum WeChatHTMLPreview {
         <body>
         <div class="reader">
           <aside class="sidebar" aria-label="聊天记录导航">
-            <div class="brand"><span class="brand-mark" aria-hidden="true">渡</span><div>聊天记录<small>由渡口导出 · 离线预览</small></div></div>
+            <div class="brand"><span class="brand-mark" aria-hidden="true">艾</span><div>聊天记录<small>由 xiaoai-archive 导出 · 离线预览</small></div></div>
             <label class="search"><span aria-hidden="true">⌕</span><input id="search" type="search" placeholder="搜索昵称或聊天内容" aria-label="搜索昵称或聊天内容"></label>
             <div class="nav-heading">时间线</div>
             <nav id="dates" aria-label="按日期查看"></nav>

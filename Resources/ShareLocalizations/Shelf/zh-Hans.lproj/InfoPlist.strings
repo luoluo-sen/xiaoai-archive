@@ -1,3 +1,4 @@
 /* 系统分享菜单中显示的名称。 */
-"CFBundleDisplayName" = "暂存到渡口";
-"CFBundleName" = "Dukou";
+"CFBundleDisplayName" = "暂存到 xiaoai-archive";
+"CFBundleName" = "xiaoai-archive";
+"NSDownloadsFolderUsageDescription" = "读取和暂存微信分享的文件，以整理并保存聊天记录。";

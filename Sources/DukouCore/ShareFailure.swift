@@ -11,7 +11,7 @@ import Foundation
 ///
 /// Deliberately not a batch: nothing was committed, so there is no history row
 /// to attach this to. It is a one-shot message, consumed by the read.
-public struct ShareFailure: Codable, Sendable, Hashable {
+public struct ShareFailure: Codable, Sendable, Hashable, LocalizedError {
     public static let directoryName = "Failures"
 
     public let at: Date
@@ -20,6 +20,7 @@ public struct ShareFailure: Codable, Sendable, Hashable {
     /// little without knowing which of the five entries produced it.
     public let action: ShareAction
     public let message: String
+    public var errorDescription: String? { message }
 
     public init(at: Date, action: ShareAction, message: String) {
         self.at = at

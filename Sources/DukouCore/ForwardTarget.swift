@@ -58,9 +58,12 @@ public struct ForwardTargetStore: Sendable {
     public static let defaultsKey = "dev.dukou.forwardTargets"
     public static let lastUsedKey = "dev.dukou.lastForwardTarget"
 
+    // Preserve the existing preference domain; it is no longer the inbox or
+    // an App Group entitlement. Only the main app reads this list.
+    public static let legacyDefaultsSuiteName = "H2P566W3PA.dev.dukou.shared"
     private let appGroupIdentifier: String
 
-    public init(appGroupIdentifier: String = AppGroup.identifier) {
+    public init(appGroupIdentifier: String = Self.legacyDefaultsSuiteName) {
         self.appGroupIdentifier = appGroupIdentifier
     }
 

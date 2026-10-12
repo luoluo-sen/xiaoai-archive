@@ -6,12 +6,20 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PROJECT="$ROOT/Project.plist"
+APP_NAME="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleName' "$ROOT/Resources/Info.plist")"
+REPOSITORY_URL="$(/usr/libexec/PlistBuddy -c 'Print :RepositoryURL' "$PROJECT")"
+TAP="$(/usr/libexec/PlistBuddy -c 'Print :HomebrewTap' "$PROJECT")"
 VERSION="${VERSION:-$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$ROOT/Resources/Info.plist")}"
 TAG="${TAG:-v$VERSION}"
-TAP="${TAP:-qzz0518/homebrew-tap}"
-CASK="${CASK:-dukou}"
-DMG_NAME="Dukou-$VERSION.dmg"
-URL="https://github.com/qzz0518/Dukou/releases/download/$TAG/$DMG_NAME"
+CASK="$APP_NAME"
+DMG_NAME="$APP_NAME-$VERSION.dmg"
+URL="$REPOSITORY_URL/releases/download/$TAG/$DMG_NAME"
+
+if [ -z "$TAP" ]; then
+	echo "set HomebrewTap in Project.plist before updating a cask" >&2
+	exit 1
+fi
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT

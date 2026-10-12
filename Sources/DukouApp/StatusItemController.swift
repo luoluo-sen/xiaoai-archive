@@ -47,7 +47,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         menu.delegate = self
         statusItem.menu = menu
 
-        statusItem.button?.toolTip = "Dukou"
+        statusItem.button?.toolTip = "xiaoai-archive"
 
         // Counted, not just emptiness: a second share landing on a shelf that
         // already held one leaves `isEmpty` unchanged, and VoiceOver went on
@@ -72,11 +72,11 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         if loaded != lastLoaded {
             lastLoaded = loaded
             let image = StatusGlyph.image(loaded: loaded)
-            image.accessibilityDescription = "Dukou"
+            image.accessibilityDescription = "xiaoai-archive"
             button.image = image
         }
         button.setAccessibilityLabel(
-            count > 0 ? L10n.format("Dukou，暂存 %d 个文件", count) : L10n.text("Dukou，暂存架是空的")
+            count > 0 ? L10n.format("xiaoai-archive，暂存 %d 个文件", count) : L10n.text("xiaoai-archive，暂存架是空的")
         )
     }
 
@@ -122,14 +122,14 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         menu.addItem(.separator())
 
         menu.addItem(item(L10n.text("设置…"), key: ",") { [weak self] in self?.openSettings(.general) })
-        menu.addItem(item(L10n.text("关于 Dukou…")) { [weak self] in self?.openSettings(.about) })
+        menu.addItem(item(L10n.text("关于 xiaoai-archive…")) { [weak self] in self?.openSettings(.about) })
         // Where a regular app keeps it: under the About item. A menu bar app
         // has no application menu, so the status menu is the only one it has.
-        menu.addItem(item(L10n.text("检查更新…"), enabled: updater.canCheckForUpdates) { [weak self] in
-            self?.updater.checkForUpdates()
+        menu.addItem(item(updater.actionTitle, enabled: updater.canPerformAction) { [weak self] in
+            self?.updater.showUpdates()
         })
         menu.addItem(.separator())
-        menu.addItem(item(L10n.text("退出 Dukou"), key: "q") { NSApp.terminate(nil) })
+        menu.addItem(item(L10n.text("退出 xiaoai-archive"), key: "q") { NSApp.terminate(nil) })
     }
 
     private func recentMenu() -> NSMenu {

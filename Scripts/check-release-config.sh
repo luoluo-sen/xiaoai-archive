@@ -1,48 +1,42 @@
 #!/usr/bin/env bash
 # Fast, secret-free checks on the metadata that ties the app, its extensions,
-# the shared container and the Sparkle feed together.
-#
-# The four plists have to agree or Dukou fails in the one way that produces no
-# error anywhere: the extension writes into a container the app cannot read, and
-# every share silently disappears. This belongs in normal CI; signing and
-# notarization stay explicit release operations.
+# the Downloads inbox and the Sparkle feed together.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$ROOT/Scripts/share-slots.sh"
+source "$ROOT/Scripts/signing-identity.sh"
 APP_INFO="$ROOT/Resources/Info.plist"
 SHARE_INFO="$ROOT/Resources/Share-Info.plist"
+PROJECT_INFO="$ROOT/Project.plist"
 APP_ENTITLEMENTS="$ROOT/Resources/Dukou.entitlements"
 SHARE_ENTITLEMENTS="$ROOT/Resources/DukouShare.entitlements"
 
-plutil -lint "$APP_INFO" "$SHARE_INFO" "$APP_ENTITLEMENTS" "$SHARE_ENTITLEMENTS" >/dev/null
+plutil -lint "$APP_INFO" "$SHARE_INFO" "$APP_ENTITLEMENTS" "$SHARE_ENTITLEMENTS" "$PROJECT_INFO" >/dev/null
 plutil -lint "$ROOT"/Resources/Localizations/*/*.strings "$ROOT"/Resources/ShareLocalizations/*/*/*.strings >/dev/null
 
 read_plist() { /usr/libexec/PlistBuddy -c "Print :$2" "$1"; }
 
 APP_ID="$(read_plist "$APP_INFO" CFBundleIdentifier)"
-APP_GROUP="$(read_plist "$APP_INFO" DKAppGroupIdentifier)"
 
-# 1. One app group, declared in four places.
-for FILE_AND_KEY in \
-	"$SHARE_INFO:DKAppGroupIdentifier" \
-	"$APP_ENTITLEMENTS:com.apple.security.application-groups:0" \
-	"$SHARE_ENTITLEMENTS:com.apple.security.application-groups:0"; do
-	FILE="${FILE_AND_KEY%%:*}"
-	KEY="${FILE_AND_KEY#*:}"
-	VALUE="$(read_plist "$FILE" "$KEY")"
-	if [ "$VALUE" != "$APP_GROUP" ]; then
-		echo "app group mismatch in $(basename "$FILE"): $VALUE != $APP_GROUP" >&2
+# 1. The extension can use Downloads without a team-bound App Group.
+if [ "$(read_plist "$SHARE_ENTITLEMENTS" com.apple.security.files.downloads.read-write)" != "true" ]; then
+	echo "the share extension must have Downloads read/write access" >&2
+	exit 1
+fi
+for FILE in "$APP_ENTITLEMENTS" "$SHARE_ENTITLEMENTS"; do
+	if /usr/libexec/PlistBuddy -c 'Print :com.apple.security.application-groups' "$FILE" >/dev/null 2>&1; then
+		echo "$(basename "$FILE") still declares the retired App Group" >&2
 		exit 1
 	fi
 done
-
-# The compiled-in fallback is what `swift run` and the tests use. If it drifts
-# from the shipped value, a development build quietly uses another container.
-if ! grep -Fq "\"$APP_GROUP\"" "$ROOT/Sources/DukouCore/AppGroup.swift"; then
-	echo "AppGroup.fallbackIdentifier does not match $APP_GROUP" >&2
-	exit 1
-fi
+for FILE in "$APP_INFO" "$SHARE_INFO"; do
+	read_plist "$FILE" NSDownloadsFolderUsageDescription >/dev/null
+	if /usr/libexec/PlistBuddy -c 'Print :DKAppGroupIdentifier' "$FILE" >/dev/null 2>&1; then
+		echo "$(basename "$FILE") still declares DKAppGroupIdentifier" >&2
+		exit 1
+	fi
+done
 
 # 2. Every Share-menu entry: a unique identifier under the app's, a known
 #    action, and a localized display name in both languages. A slot that is
@@ -187,20 +181,42 @@ for REQUIRED in "$ROOT/LICENSE" "$ROOT/Resources/AppIcon.icns"; do
 	fi
 done
 
-# 8. Sparkle. A feed that is not HTTPS, a key that is not 32 bytes, or a
-#    build that does not insist on a signed feed each turn "update" into a
-#    way of running somebody else's code as Dukou.
-FEED_URL="$(read_plist "$APP_INFO" SUFeedURL)"
-case "$FEED_URL" in
+# 8. The project owns its release links and any enabled Sparkle feed.
+#    Disabled automatic updates must not keep an upstream feed in the template.
+REPOSITORY_URL="$(read_plist "$PROJECT_INFO" RepositoryURL)"
+UPDATE_BASE_URL="$(read_plist "$PROJECT_INFO" UpdateBaseURL)"
+AUTOMATIC_UPDATES="$(read_plist "$PROJECT_INFO" AutomaticUpdatesEnabled)"
+case "$REPOSITORY_URL" in
 	https://*) ;;
-	*) echo "SUFeedURL must use HTTPS: $FEED_URL" >&2; exit 1 ;;
+	*) echo "RepositoryURL must use HTTPS: $REPOSITORY_URL" >&2; exit 1 ;;
 esac
-KEY_BYTES="$(read_plist "$APP_INFO" SUPublicEDKey | base64 --decode 2>/dev/null | wc -c | tr -d ' ')"
-if [ "$KEY_BYTES" != "32" ]; then
-	echo "SUPublicEDKey must decode to a 32-byte Ed25519 public key" >&2
-	exit 1
-fi
-for BOOLEAN_KEY in SUEnableAutomaticChecks SURequireSignedFeed SUVerifyUpdateBeforeExtraction; do
+case "$AUTOMATIC_UPDATES" in
+	true)
+		case "$UPDATE_BASE_URL" in
+			https://*/) ;;
+			*) echo "UpdateBaseURL must be HTTPS with a trailing slash" >&2; exit 1 ;;
+		esac
+		KEY_BYTES="$(read_plist "$PROJECT_INFO" UpdatePublicEDKey | base64 --decode 2>/dev/null | wc -c | tr -d ' ')"
+		if [ "$KEY_BYTES" != "32" ]; then
+			echo "UpdatePublicEDKey must decode to a 32-byte Ed25519 public key" >&2
+			exit 1
+		fi
+		;;
+	false)
+		for KEY in SUFeedURL SUPublicEDKey; do
+			if /usr/libexec/PlistBuddy -c "Print :$KEY" "$APP_INFO" >/dev/null 2>&1; then
+				echo "automatic updates are disabled; Info.plist must not declare $KEY" >&2
+				exit 1
+			fi
+		done
+		if [ "$(read_plist "$APP_INFO" SUEnableAutomaticChecks)" != "false" ]; then
+			echo "disabled automatic updates require SUEnableAutomaticChecks=false" >&2
+			exit 1
+		fi
+		;;
+	*) echo "AutomaticUpdatesEnabled must be a boolean" >&2; exit 1 ;;
+esac
+for BOOLEAN_KEY in SURequireSignedFeed SUVerifyUpdateBeforeExtraction; do
 	if [ "$(read_plist "$APP_INFO" "$BOOLEAN_KEY")" != "true" ]; then
 		echo "$BOOLEAN_KEY must be enabled" >&2
 		exit 1
@@ -248,4 +264,12 @@ if git -C "$ROOT" ls-files 2>/dev/null | grep -qE '\.(p12|pem|key|cer|p8)$'; the
 	exit 1
 fi
 
-echo "Release configuration validation passed: $APP_ID, ${#SHARE_SLOTS[@]} share entries, app group $APP_GROUP, Sparkle 2.9.6 on a signed HTTPS feed."
+case "${DISTRIBUTION:-0}" in
+	0) ;;
+	1)
+		project_distribution_team_id "$PROJECT_INFO" >/dev/null
+		;;
+	*) echo "DISTRIBUTION must be 0 or 1." >&2; exit 1 ;;
+esac
+
+echo "Release configuration validation passed: $APP_ID, ${#SHARE_SLOTS[@]} share entries, Downloads inbox, repository $REPOSITORY_URL, automatic updates $AUTOMATIC_UPDATES."

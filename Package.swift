@@ -6,10 +6,10 @@ import PackageDescription
 // notion of an `.appex`, so both are plain executables here and
 // `Scripts/make-app.sh` assembles and signs the bundle around them.
 let package = Package(
-    name: "Dukou",
+    name: "xiaoai-archive",
     platforms: [.macOS(.v14)],
     products: [
-        .executable(name: "Dukou", targets: ["DukouApp"]),
+        .executable(name: "xiaoai-archive", targets: ["DukouApp"]),
         .executable(name: "DukouShare", targets: ["DukouShare"]),
         .library(name: "DukouCore", targets: ["DukouCore"]),
     ],

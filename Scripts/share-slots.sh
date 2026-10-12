@@ -13,11 +13,11 @@
 # There is no sixth row per app the user installs: an entry is a signed bundle
 # inside Dukou.app and cannot be created at runtime. 「发送到自定义」 is the
 # answer to that — one entry that asks which app, from a list the settings
-# window writes into the app group.
+# window writes into the Downloads inbox.
 #
 # slot | appex name | bundle id suffix | DKShareAction | default display name
 SHARE_SLOTS=(
-	"Shelf|DukouShare|Share|shelf|暂存到渡口"
+	"Shelf|DukouShare|Share|shelf|暂存到 xiaoai-archive"
 	"Codex|DukouShareCodex|ShareCodex|codex|发给 Codex"
 	"Claude|DukouShareClaude|ShareClaude|claude|发给 Claude"
 	"Clipboard|DukouShareClipboard|ShareClipboard|clipboard|复制到剪贴板"

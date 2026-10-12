@@ -1,29 +1,49 @@
 #!/usr/bin/env bash
-# Build the one canonical Dukou release DMG used by GitHub Releases, Sparkle
+# Build the canonical project release DMG used by GitHub Releases, Sparkle
 # and Homebrew. The source commit and tag must already exist; secrets stay in
 # the login keychain and are referenced only by identity hash / profile name.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "$ROOT/Scripts/signing-identity.sh"
+PROJECT="$ROOT/Project.plist"
+APP_NAME="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleName' "$ROOT/Resources/Info.plist")"
+REPOSITORY_URL="$(/usr/libexec/PlistBuddy -c 'Print :RepositoryURL' "$PROJECT")"
+UPDATE_BASE_URL="$(/usr/libexec/PlistBuddy -c 'Print :UpdateBaseURL' "$PROJECT")"
+UPDATES_ENABLED="$(/usr/libexec/PlistBuddy -c 'Print :AutomaticUpdatesEnabled' "$PROJECT")"
+NOTARY_PROFILE="$(/usr/libexec/PlistBuddy -c 'Print :NotaryProfile' "$PROJECT")"
 VERSION="${VERSION:-$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$ROOT/Resources/Info.plist")}"
 BUILD_NUMBER="${BUILD_NUMBER:-$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$ROOT/Resources/Info.plist")}"
 TAG="${TAG:-v$VERSION}"
 ARCHS="${ARCHS:-arm64 x86_64}"
 NOTARIZE="${NOTARIZE:-1}"
-GENERATE_APPCAST="${GENERATE_APPCAST:-1}"
 REQUIRE_TAG="${REQUIRE_TAG:-1}"
 REQUIRE_CLEAN="${REQUIRE_CLEAN:-1}"
-# The `notarytool store-credentials` profile to submit with. Apple issues
-# notarization credentials per Apple ID and team, not per app, so one stored
-# profile covers everything team H2P566W3PA signs — this Mac keeps it under the
-# name of the first app that needed it. The old default, `Dukou-Notary`, was a
-# name nothing had ever stored, so every release stopped on a missing keychain
-# item that read like lost credentials.
-NOTARY_PROFILE="${NOTARY_PROFILE:-Charker-Notary}"
-APP="$ROOT/dist/Dukou.app"
-APP_ZIP="$ROOT/dist/Dukou-$VERSION.app.zip"
-DMG="$ROOT/dist/Dukou-$VERSION.dmg"
+RELEASE_DIR="$ROOT/dist/release"
+APP="$RELEASE_DIR/$APP_NAME.app"
+APP_ZIP="$RELEASE_DIR/$APP_NAME-$VERSION.app.zip"
+DMG="$RELEASE_DIR/$APP_NAME-$VERSION.dmg"
 UPDATES_DIR="$ROOT/dist/updates"
+
+if [ -z "${GENERATE_APPCAST+x}" ]; then
+	if [ "$UPDATES_ENABLED" = "true" ]; then
+		GENERATE_APPCAST=1
+	else
+		GENERATE_APPCAST=0
+	fi
+fi
+
+if [ "$NOTARIZE" = "1" ] && [ -z "$NOTARY_PROFILE" ]; then
+	echo "set NotaryProfile in Project.plist before creating a notarized release" >&2
+	exit 1
+fi
+DISTRIBUTION=1 "$ROOT/Scripts/check-release-config.sh"
+if [ "$GENERATE_APPCAST" = "1" ]; then
+	if [ "$UPDATES_ENABLED" != "true" ]; then
+		echo "automatic updates are disabled in Project.plist; no appcast will be generated" >&2
+		exit 1
+	fi
+fi
 
 if [ "$REQUIRE_CLEAN" = "1" ] && [ -n "$(git -C "$ROOT" status --porcelain)" ]; then
 	echo "release requires a clean Git working tree" >&2
@@ -46,11 +66,7 @@ if [ "$GENERATE_APPCAST" = "1" ]; then
 	done
 fi
 
-IDENTITY="${IDENTITY:-$(security find-identity -v -p codesigning 2>/dev/null | awk '/Developer ID Application:/ {print $2; exit}')}"
-if [ -z "$IDENTITY" ]; then
-	echo "no valid Developer ID Application identity was found" >&2
-	exit 1
-fi
+IDENTITY="$(project_signing_identity "$PROJECT" 1)"
 
 notarize_artifact() {
 	local artifact="$1"
@@ -80,7 +96,7 @@ if [ "$NOTARIZE" = "1" ]; then
 fi
 
 VERSION="$VERSION" BUILD_NUMBER="$BUILD_NUMBER" ARCHS="$ARCHS" \
-	IDENTITY="$IDENTITY" DISTRIBUTION=1 CONFIG=release \
+	DISTRIBUTION=1 CONFIG=release \
 	"$ROOT/Scripts/make-app.sh"
 
 # The app needs its own stapled ticket before it is sealed inside the DMG.
@@ -121,14 +137,14 @@ if [ "$GENERATE_APPCAST" = "1" ]; then
 	fi
 	rm -rf "$UPDATES_DIR"
 	mkdir -p "$UPDATES_DIR"
-	# The previous feed is the input, so the new appcast keeps every older
-	# item and only appends this release.
+	# Only this project's feed is input. The imported upstream feed lives in
+	# Resources/UpstreamSite and must never enter this project's update channel.
 	if [ -f "$ROOT/site/appcast.xml" ]; then
 		cp "$ROOT/site/appcast.xml" "$UPDATES_DIR/appcast.xml"
 	fi
 	cp "$DMG" "$UPDATES_DIR/"
 	# Styled HTML from Resources/ReleaseNotes/<version>.md and <version>.zh.md:
-	# `Dukou-<version>.html` is the English default, `.zh.html` becomes the
+	# `<app>-<version>.html` is the English default, `.zh.html` becomes the
 	# `xml:lang="zh"` link (generate_appcast only recognises two-letter codes).
 	# Full documents, so they are linked and signed rather than embedded.
 	swift "$ROOT/Scripts/release-notes.swift" sparkle \
@@ -138,10 +154,10 @@ if [ "$GENERATE_APPCAST" = "1" ]; then
 	# and every version is kept: the history page is built from this feed.
 	# "Version History" in Sparkle's up-to-date alert opens the history page.
 	"$SPARKLE_TOOLS/generate_appcast" \
-		--download-url-prefix "https://github.com/qzz0518/Dukou/releases/download/$TAG/" \
-		--release-notes-url-prefix "https://qzz0518.github.io/Dukou/" \
-		--full-release-notes-url "https://qzz0518.github.io/Dukou/updates.html" \
-		--link "https://github.com/qzz0518/Dukou" \
+		--download-url-prefix "$REPOSITORY_URL/releases/download/$TAG/" \
+		--release-notes-url-prefix "$UPDATE_BASE_URL" \
+		--full-release-notes-url "${UPDATE_BASE_URL}updates.html" \
+		--link "$REPOSITORY_URL" \
 		--maximum-deltas 0 \
 		--maximum-versions 0 \
 		"$UPDATES_DIR"
@@ -153,6 +169,6 @@ echo "release artifact: $DMG"
 echo "checksum: $DMG.sha256"
 if [ -f "$UPDATES_DIR/appcast.xml" ]; then
 	echo "signed appcast: $UPDATES_DIR/appcast.xml"
-	echo "publish: copy appcast.xml, Dukou-$VERSION*.html and updates.html from $UPDATES_DIR to site/, then commit"
+	echo "publish: copy appcast.xml, $APP_NAME-$VERSION*.html and updates.html from $UPDATES_DIR to site/, then commit"
 fi
 echo "homebrew cask: run Scripts/update-tap.sh once the GitHub Release exists"

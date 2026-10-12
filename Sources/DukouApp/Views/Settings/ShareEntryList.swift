@@ -18,7 +18,7 @@ struct ShareEntryList: View {
             ForEach(ShareAction.allCases, id: \.self) { row($0) }
 
             if probe.hasUnregisteredEntry {
-                Notice(L10n.text("Dukou 需要安装在「应用程序」文件夹里，系统才会登记这些入口。"))
+                Notice(L10n.text("xiaoai-archive 需要安装在「应用程序」文件夹里，系统才会登记这些入口。"))
             }
         }
     }

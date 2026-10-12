@@ -1,3 +1,4 @@
 /* The name shown in the system Share menu. */
 "CFBundleDisplayName" = "Send to Custom";
-"CFBundleName" = "Dukou";
+"CFBundleName" = "xiaoai-archive";
+"NSDownloadsFolderUsageDescription" = "Read and stage files shared by WeChat to organize and save chat archives.";

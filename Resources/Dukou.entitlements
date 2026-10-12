@@ -14,12 +14,6 @@
 	     is "no network entitlement, files never leave the Mac" — that claim is
 	     unaffected. The extensions keep the sandbox: they run inside WeChat's
 	     share sheet, handle untrusted attachments, and never call pluginkit. -->
-	<!-- The only channel between the extensions and this app. It must match
-	     DukouShare.entitlements and the DKAppGroupIdentifier in both plists. -->
-	<key>com.apple.security.application-groups</key>
-	<array>
-		<string>H2P566W3PA.dev.dukou.shared</string>
-	</array>
 	<!-- Deliberately absent: no network client, no server, no user-selected
 	     file access. Dukou reads what the extension handed it and hands it on. -->
 </dict>

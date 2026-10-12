@@ -5,7 +5,7 @@
 	<key>CFBundleDevelopmentRegion</key>
 	<string>zh-Hans</string>
 	<key>CFBundleExecutable</key>
-	<string>Dukou</string>
+	<string>xiaoai-archive</string>
 	<key>CFBundleIconFile</key>
 	<string>AppIcon</string>
 	<key>CFBundleIdentifier</key>
@@ -13,7 +13,9 @@
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleName</key>
-	<string>Dukou</string>
+	<string>xiaoai-archive</string>
+	<key>CFBundleDisplayName</key>
+	<string>xiaoai-archive</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
@@ -30,9 +32,9 @@
 		</dict>
 	</array>
 	<key>CFBundleVersion</key>
-	<string>15</string>
-	<key>DKAppGroupIdentifier</key>
-	<string>H2P566W3PA.dev.dukou.shared</string>
+	<string>27</string>
+	<key>NSDownloadsFolderUsageDescription</key>
+	<string>读取和暂存微信分享的文件，以整理并保存聊天记录。</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>14.0</string>
 	<key>LSUIElement</key>
@@ -40,7 +42,7 @@
 	<key>NSHumanReadableCopyright</key>
 	<string>本地文件中转工具，不解压也不上传分享内容。</string>
 	<key>SUEnableAutomaticChecks</key>
-	<true/>
+	<false/>
 	<key>SURequireSignedFeed</key>
 	<true/>
 	<key>SUVerifyUpdateBeforeExtraction</key>

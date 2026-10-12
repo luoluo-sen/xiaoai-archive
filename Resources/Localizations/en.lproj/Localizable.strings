@@ -1,6 +1,6 @@
 /* Menu bar and status */
-"Dukou，暂存 %d 个文件" = "Dukou, %d files on the shelf";
-"Dukou，暂存架是空的" = "Dukou, the shelf is empty";
+"xiaoai-archive，暂存 %d 个文件" = "xiaoai-archive, %d files on the shelf";
+"xiaoai-archive，暂存架是空的" = "xiaoai-archive, the shelf is empty";
 "显示暂存架" = "Show Shelf";
 "清空暂存架" = "Clear Shelf";
 "最近记录" = "Recent";
@@ -8,8 +8,8 @@
 "全部记录…" = "All Records…";
 "清空记录" = "Clear History";
 "设置…" = "Settings…";
-"关于 Dukou…" = "About Dukou…";
-"退出 Dukou" = "Quit Dukou";
+"关于 xiaoai-archive…" = "About xiaoai-archive…";
+"退出 xiaoai-archive" = "Quit xiaoai-archive";
 
 /* Shelf */
 "1 个文件" = "1 file";
@@ -47,8 +47,8 @@
 "没能接住这次转发：%@" = "Couldn't receive that share: %@";
 
 /* Import errors */
-"无法访问共享容器 %@。" = "Cannot reach the shared container %@.";
-"这项内容不是 Dukou 能保存的文件（%@）。" = "Dukou cannot save this item as a file (%@).";
+"收件箱尚未就绪，请检查“下载”文件夹的访问权限。" = "The inbox is not ready. Check access to the Downloads folder.";
+"这项内容不是 xiaoai-archive 能保存的文件（%@）。" = "xiaoai-archive cannot save this item as a file (%@).";
 "未知类型" = "unknown type";
 "这次分享没有包含任何文件。" = "This share contained no files.";
 "批次清单无法读取：%@" = "The batch manifest could not be read: %@";
@@ -61,17 +61,17 @@
 "这台 Mac 上没有找到 %@。" = "%@ is not installed on this Mac.";
 "%@ 没有切到前台，已经放弃自动粘贴。" = "%@ never came to the front, so the paste was abandoned.";
 "系统没有接受这次按键事件。" = "The system did not accept the keystroke.";
-"Dukou 还没有「辅助功能」权限，没法代你按 ⌘V。" = "Dukou does not have Accessibility permission yet, so it cannot press ⌘V for you.";
+"xiaoai-archive 还没有「辅助功能」权限，没法代你按 ⌘V。" = "xiaoai-archive does not have Accessibility permission yet, so it cannot press ⌘V for you.";
 
 /* Shelf coach mark */
 "拖出去就送达；连续暂存会叠在一起。" = "Drag it out and it is delivered; new stashes pile onto the same shelf.";
 "知道了" = "Got It";
 
 /* Permission guide */
-"把 **Dukou** 拖进上方列表，然后打开它的开关" = "Drag **Dukou** into the list above, then switch it on";
+"把 **xiaoai-archive** 拖进上方列表，然后打开它的开关" = "Drag **xiaoai-archive** into the list above, then switch it on";
 "已授权，转发时可以自动粘贴了。" = "Granted — forwards can paste automatically now.";
 "关闭引导" = "Close Guide";
-"Dukou 应用，拖到辅助功能列表" = "The Dukou app, drag into the Accessibility list";
+"xiaoai-archive 应用，拖到辅助功能列表" = "The xiaoai-archive app, drag into the Accessibility list";
 
 /* Settings window · navigation */
 "通用" = "General";
@@ -84,7 +84,7 @@
 "启动" = "Startup";
 "登录时自动启动" = "Open at login";
 "在程序坞显示图标" = "Show in Dock";
-"关掉后只在菜单栏里。" = "When off, Dukou lives only in the menu bar.";
+"关掉后只在菜单栏里。" = "When off, xiaoai-archive lives only in the menu bar.";
 "还需要在系统设置里允许。" = "It still needs your approval in System Settings.";
 "打开登录项设置" = "Open Login Items Settings";
 "停靠位置" = "Docked corner";
@@ -105,14 +105,14 @@
 
 /* Settings window · Entries */
 "转发菜单里的入口" = "Entries in the forward menu";
-"暂存到渡口" = "Stash in Dukou";
+"暂存到 xiaoai-archive" = "Stash in xiaoai-archive";
 "放到暂存架，自己拖到任何 App。" = "Puts them on the shelf so you can drag them into any app.";
 "激活 ChatGPT 并直接粘贴到输入框。" = "Brings ChatGPT forward and pastes straight into its input.";
 "激活 Claude 并直接粘贴到输入框。" = "Brings Claude forward and pastes straight into its input.";
 "只放进剪贴板。" = "Only copies them to the clipboard.";
-"转发时从你自己的清单里挑一个 App，激活它并粘贴。" = "Pick an app from your own list when you forward; Dukou brings it forward and pastes.";
+"转发时从你自己的清单里挑一个 App，激活它并粘贴。" = "Pick an app from your own list when you forward; xiaoai-archive brings it forward and pastes.";
 "未注册" = "Not registered";
-"Dukou 需要安装在「应用程序」文件夹里，系统才会登记这些入口。" = "macOS only registers these entries once Dukou lives in your Applications folder.";
+"xiaoai-archive 需要安装在「应用程序」文件夹里，系统才会登记这些入口。" = "macOS only registers these entries once xiaoai-archive lives in your Applications folder.";
 "也可以在「系统设置 → 登录项与扩展 → 共享」里管理。" = "You can also manage them in System Settings → Login Items & Extensions → Sharing.";
 "打开系统设置" = "Open System Settings";
 "「发送到自定义」的应用" = "Apps for Send to Custom";
@@ -132,7 +132,7 @@
 "已授权" = "Granted";
 "未授权" = "Not granted";
 "引导授权" = "Show Me How";
-"辅助功能不会弹系统授权框，需要把 Dukou 拖进列表；授权后立即生效，不必重启。" = "Accessibility never prompts: you drag Dukou into the list yourself. It takes effect immediately, with no restart.";
+"辅助功能需要把 xiaoai-archive 加入系统列表并打开开关；更新应用后可能需要重新添加授权并重启。" = "Add xiaoai-archive to the Accessibility list and switch it on. After an app update, you may need to add it again and restart.";
 
 /* Settings window · History */
 "共 %d 条 · 占用 %@" = "%d in history · %@ on disk";
@@ -146,17 +146,16 @@
 "未执行" = "Not carried out";
 "更多操作" = "More Actions";
 "还没有记录" = "Nothing here yet";
-"从微信转发到任意一个 Dukou 入口后，这里会列出来。" = "Forward from WeChat to any Dukou entry and it will be listed here.";
+"从微信转发到任意一个 xiaoai-archive 入口后，这里会列出来。" = "Forward from WeChat to any xiaoai-archive entry and it will be listed here.";
 
 /* Settings window · About */
 "版本 %@ (%@)" = "Version %@ (%@)";
-"Dukou 做什么" = "What Dukou does";
+"xiaoai-archive 做什么" = "What xiaoai-archive does";
 "在微信的转发菜单里，直接把聊天记录送到你要用的地方。" = "Send chat history straight from WeChat's forward menu to wherever you need it.";
 "也是聊天记录与朋友圈的本地备份工具：导出只走微信自带的转发和朋友圈界面，不读数据库、不解密、不注入。" = "It doubles as a local backup tool for your chats and Moments: exports go through WeChat's own forward menu and Moments window — no database reads, no decryption, no injection.";
-"聊天文件在本机处理，渡口不会上传聊天内容。文件会按清理设置保留，可随时在「记录」中管理。" = "Chat files are processed on this Mac. Dukou does not upload your conversations. Files follow your retention settings and can be managed in History.";
+"聊天文件在本机处理，xiaoai-archive 不会上传聊天内容。文件会按清理设置保留，可随时在「记录」中管理。" = "Chat files are processed on this Mac. xiaoai-archive does not upload your conversations. Files follow your retention settings and can be managed in History.";
 "链接" = "Links";
 "源码与问题反馈" = "Source and issues";
-"作者" = "Author";
 "打开" = "Open";
 
 /* First-run guide */
@@ -167,18 +166,18 @@
 "继续" = "Continue";
 "上一步" = "Back";
 "把微信的转发菜单接到你要去的地方" = "Point WeChat’s forward menu at where you work";
-"把微信里的聊天记录压缩包接住，再拖给任何一个 App。" = "Dukou catches the chat archive WeChat hands over, ready for you to drag into any app.";
+"把微信里的聊天记录压缩包接住，再拖给任何一个 App。" = "xiaoai-archive catches the chat archive WeChat hands over, ready for you to drag into any app.";
 "转发到其他应用" = "Forward to Another App";
-"暂存到渡口，再拖到任何地方" = "Stash it in Dukou, then drag it anywhere";
-"用「暂存到渡口」转发过来的文件，都停在这个方块上。" = "Everything forwarded through Stash in Dukou waits on this one square.";
+"暂存到 xiaoai-archive，再拖到任何地方" = "Stash it in xiaoai-archive, then drag it anywhere";
+"用「暂存到 xiaoai-archive」转发过来的文件，都停在这个方块上。" = "Everything forwarded through Stash in xiaoai-archive waits on this one square.";
 "可以叠加：连续暂存几次，都会摞在同一个架子上，右上角的数字就是件数。" = "They stack: stash several times over and it all piles onto one shelf, with the count in the corner.";
 "拖出去就送达：把图标拖进任何 App 或文件夹，文件就过去了，架子随之清空；文件本身还留在「记录」里。" = "Drag it out to deliver it: drop the icon into any app or folder and the files go there, clearing the shelf — the files themselves stay in History.";
 "✕ 移出架子，⌄ 展开成列表逐个拖；右键还能直接发给 Codex / Claude。" = "✕ clears the shelf, ⌄ expands it into a list you can drag row by row, and a right-click sends straight to Codex or Claude.";
 "聊天记录.zip" = "chat-history.zip";
 "终端" = "Terminal";
-"让 Dukou 代你按 ⌘V" = "Let Dukou press ⌘V for you";
+"让 xiaoai-archive 代你按 ⌘V" = "Let xiaoai-archive press ⌘V for you";
 "用于操作微信，以及激活目标应用并粘贴；只暂存或复制不需要。" = "Used to control WeChat and bring the destination app forward to paste. Stashing and copying do not need it.";
-"可以先跳过，第一次转发失败时 Dukou 会再引导一次。" = "You can skip this — Dukou will offer to walk you through it the first time a forward fails.";
+"可以先跳过，第一次转发失败时 xiaoai-archive 会再引导一次。" = "You can skip this — xiaoai-archive will offer to walk you through it the first time a forward fails.";
 "稍后再说" = "Later";
 "好了" = "All set";
 "去微信多选聊天记录 → 转发到其他应用，就能看到这些入口了。" = "In WeChat, select chats → Forward to Another App, and these entries will be waiting.";
@@ -217,7 +216,7 @@
 "正在打开微信群聊…" = "Opening the WeChat group…";
 "正在粘贴到 %@…" = "Pasting into %@…";
 "正在运行的应用" = "Running apps";
-"没有找到「暂存到渡口」分享入口。请在设置的「入口」中启用它。" = "The Keep in Dukou share entry was not found. Enable it in Settings → Entries.";
+"没有找到「暂存到 xiaoai-archive」分享入口。请在设置的「入口」中启用它。" = "The Keep in xiaoai-archive share entry was not found. Enable it in Settings → Entries.";
 "没有找到唯一匹配的群聊。请先在微信中打开这个群，再重新执行。" = "A unique matching group was not found. Open it in WeChat, then run again.";
 "等待开始微信转发…" = "Waiting to start WeChat forwarding…";
 "等待微信导出超时。已收到的文件会保留在暂存架。" = "WeChat export timed out. Files already received remain on the shelf.";
@@ -229,7 +228,7 @@
 "记住的群聊" = "Remembered groups";
 "请先关闭微信的聊天记录窗口，或退出正在进行的多选、转发。" = "Close WeChat history or finish the current selection or forward before starting.";
 "请先打开并登录微信。" = "Open WeChat and sign in first.";
-"微信没有向这个账号开放界面控件，快捷转发用不了，重装或重新授权无效。请在微信里手动多选后转发到 Dukou。" = "WeChat does not expose its controls for this account, so quick forward cannot run. Reinstalling or re-granting permission will not help. Select messages in WeChat yourself and forward them to Dukou.";
+"微信没有向这个账号开放界面控件，快捷转发用不了，重装或重新授权无效。请在微信里手动多选后转发到 xiaoai-archive。" = "WeChat does not expose its controls for this account, so quick forward cannot run. Reinstalling or re-granting permission will not help. Select messages in WeChat yourself and forward them to xiaoai-archive.";
 "请输入 1–%d 之间的整数。" = "Enter an integer from 1 to %d.";
 "读取当前群" = "Use current group";
 "转发内容" = "Messages to forward";
@@ -240,9 +239,11 @@
 "微信消息列表尚未稳定。请等待加载完成后重试。" = "The WeChat message list has not settled. Wait for loading to finish, then try again.";
 "正在加载更早的聊天记录 · 已加载 %d 条" = "Loading earlier messages · %d loaded";
 "正在加载更早的聊天记录…" = "Loading earlier chat messages…";
-"正在选择并导出消息 · 已完成约 %d 条" = "Selecting and exporting messages · about %d complete";
+"正在选择消息 · 已导出约 %d 条" = "Selecting messages · about %d exported";
+"已选中 %d 条消息，正在导出…" = "%d messages selected, exporting…";
+"正在等待微信导出文件…" = "Waiting for WeChat to export files…";
 "没有定位到“转发到其他应用”按钮，已停止。请保持微信转发窗口完整可见。" = "Could not locate Forward to Other Apps. Keep the entire WeChat forward window visible and try again.";
-"这个转发界面需要识别按钮位置。请在系统设置中为渡口开启屏幕录制权限后重试。" = "This forward layout needs visual button recognition. Enable Screen Recording for Dukou in System Settings and try again.";
+"这个转发界面需要识别按钮位置。请在系统设置中为 xiaoai-archive 开启屏幕录制权限后重试。" = "This forward layout needs visual button recognition. Enable Screen Recording for xiaoai-archive in System Settings and try again.";
 "按时间选取暂未开放，请改用条数。" = "Time ranges are not available yet. Select a message count instead.";
 "改用条数" = "Use message count";
 
@@ -250,6 +251,7 @@
 
 /* Software updates — About pane and status menu */
 "检查更新…" = "Check for Updates…";
+"维护者" = "Maintainer";
 
 /* Attached prompt — Entries and quick WeChat forward */
 "附加 Prompt" = "Attached Prompt";
@@ -363,3 +365,63 @@
 "附带" = "Include";
 "图片" = "Photos";
 "视频" = "Videos";
+
+/* Current WeChat window list */
+"当前窗口列表" = "Current window list";
+"读取当前微信窗口中已加载的会话名称。" = "Read the loaded conversation names in the current WeChat window.";
+"读取窗口列表" = "Read window list";
+"正在读取窗口列表…" = "Reading window list…";
+"%@ · %d 个已加载会话" = "%@ · %d loaded conversations";
+"已确认 %d 个群聊，另有 %d 个会话待确认。" = "%d confirmed groups and %d conversations with unverified type.";
+"群聊（已确认）" = "Confirmed group";
+"类型待确认" = "Unverified type";
+"仅当前打开会话的群聊类型可确认，其他会话不按名称猜测类型。" = "Only the open conversation can be confirmed as a group. Other types are not inferred from names.";
+"其他会话请在微信中手动展开或滚动后重新读取。" = "To include other conversations, expand or scroll the list in WeChat, then read again.";
+"普通会话" = "Conversations";
+"折叠的聊天" = "Folded chats";
+"读取窗口列表需要辅助功能权限。" = "Reading the window list requires Accessibility permission.";
+"请先在微信中打开一个聊天窗口。" = "Open a chat window in WeChat first.";
+"无法确定当前微信窗口。请先选中需要读取的微信窗口。" = "The current WeChat window is ambiguous. Select the window you want to read first.";
+"当前微信窗口没有可读取的会话列表，请先打开普通或折叠聊天列表。" = "This WeChat window has no readable conversation list. Open the regular or folded chat list first.";
+"当前微信窗口包含多个会话列表，无法确认需要读取哪一个。" = "This WeChat window has multiple conversation lists. The target list is ambiguous.";
+"有会话没有提供完整名称，本次列表读取未完成。" = "A conversation did not provide a complete name. The list could not be read completely.";
+"微信没有提供预期的列表结构，本次读取未完成。" = "WeChat did not provide the expected list structure. The read could not complete.";
+"读取期间微信窗口或列表发生变化，请重新读取。" = "The WeChat window or list changed during reading. Read the list again.";
+"读取微信界面失败（%@，错误 %d）。" = "Could not read the WeChat interface (%@, error %d).";
+
+/* Application menus */
+"服务" = "Services";
+"隐藏 xiaoai-archive" = "Hide xiaoai-archive";
+"隐藏其他" = "Hide Others";
+"全部显示" = "Show All";
+"编辑" = "Edit";
+"撤销" = "Undo";
+"重做" = "Redo";
+"剪切" = "Cut";
+"拷贝" = "Copy";
+"全选" = "Select All";
+"窗口" = "Window";
+"最小化" = "Minimize";
+"缩放" = "Zoom";
+"前置全部窗口" = "Bring All to Front";
+
+/* GitHub release checks */
+"正在检查更新…" = "Checking for updates…";
+"尚未发布正式版本" = "No stable release published";
+"当前版本：%@（构建 %@）。仓库尚无正式 Release，发布后即可检测版本更新。" = "Current version: %@ (build %@). This repository has no stable release yet. Updates can be detected once one is published.";
+"当前版本：%@（构建 %@）" = "Current version: %@ (build %@)";
+"最新发行版本：%@" = "Latest release: %@";
+"关闭" = "Close";
+"发现新版本 %@" = "New version %@ available";
+"没有发现更高版本" = "No newer version found";
+"检查更新失败" = "Update check failed";
+"项目地址必须是公开的 GitHub 仓库地址。" = "The project URL must point to a public GitHub repository.";
+"GitHub 没有返回有效的更新响应。" = "GitHub did not return a valid update response.";
+"GitHub 更新请求失败（HTTP %d）。" = "The GitHub update request failed (HTTP %d).";
+"无法识别版本号 %@，请使用 v1.2.3 或 1.2.3 格式。" = "Version %@ is not recognized. Use v1.2.3 or 1.2.3.";
+"查看发行说明与下载" = "Release notes and downloads";
+
+/* First installation */
+"请先启用至少一个分享入口。快捷微信转发需要「暂存到 xiaoai-archive」。" = "Enable at least one sharing entry. Quick WeChat forwarding requires Stash in xiaoai-archive.";
+"入口尚未启用" = "No entry enabled";
+"返回入口" = "Back to Entries";

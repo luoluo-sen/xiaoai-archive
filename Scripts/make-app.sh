@@ -1,52 +1,36 @@
 #!/usr/bin/env bash
-# Assemble and sign Dukou.app, with five share extensions nested inside it.
+# Assemble and sign the app, with five share extensions nested inside it.
 #
-# Local development stays fast by building the host architecture and signing
-# ad-hoc. A distribution build passes both architectures, a Developer ID hash,
-# and DISTRIBUTION=1; the extension is then signed before the app, because a
-# signature over a bundle has to cover code that is already final.
+# Local and distribution builds use separate fixed identities in Project.plist.
+# Extensions are signed before the app so its signature covers final nested code.
 set -euo pipefail
 
 CONFIG="${CONFIG:-release}"
 
-# TCC remembers a permission by code signature, so an ad-hoc signature — which
-# changes on every build — makes the user re-grant Accessibility after every
-# rebuild. A stable Developer ID or Apple Development identity is picked
-# automatically when the keychain has one; ad-hoc stays the fallback so a clone
-# without any certificate still builds.
-select_identity() {
-	local found
-	for PREFIX in "Developer ID Application:" "Apple Development:"; do
-		found="$(security find-identity -v -p codesigning 2>/dev/null \
-			| awk -v prefix="$PREFIX" 'index($0, prefix) { print $2; exit }')"
-		if [ -n "$found" ]; then
-			printf '%s' "$found"
-			return
-		fi
-	done
-	printf '%s' '-'
-}
-IDENTITY="${IDENTITY:-$(select_identity)}"
 DISTRIBUTION="${DISTRIBUTION:-0}"
 ARCHS="${ARCHS:-$(uname -m)}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$ROOT/Scripts/share-slots.sh"
-APP="${APP_PATH:-$ROOT/dist/Dukou.app}"
-BUILD_ROOT="${BUILD_ROOT:-$ROOT/.build/dukou-bundle}"
+source "$ROOT/Scripts/signing-identity.sh"
 APP_INFO="$ROOT/Resources/Info.plist"
 SHARE_INFO="$ROOT/Resources/Share-Info.plist"
+PROJECT_INFO="$ROOT/Project.plist"
+IDENTITY="$(project_signing_identity "$PROJECT_INFO" "$DISTRIBUTION")"
+if [ "$DISTRIBUTION" = "1" ]; then
+	TEAM_ID="$(project_distribution_team_id "$PROJECT_INFO")"
+	BUILD_ROOT="${BUILD_ROOT:-$ROOT/.build/dukou-release-bundle}"
+	OUTPUT_ROOT="$ROOT/dist/release"
+else
+	BUILD_ROOT="${BUILD_ROOT:-$ROOT/.build/dukou-bundle}"
+	OUTPUT_ROOT="$ROOT/dist"
+fi
+APP_NAME="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleName' "$APP_INFO")"
+APP_EXECUTABLE="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP_INFO")"
+APP="${APP_PATH:-$OUTPUT_ROOT/$APP_NAME.app}"
 APP_ENTITLEMENTS="$ROOT/Resources/Dukou.entitlements"
 SHARE_ENTITLEMENTS="$ROOT/Resources/DukouShare.entitlements"
 VERSION="${VERSION:-$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_INFO")}"
 BUILD_NUMBER="${BUILD_NUMBER:-$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_INFO")}"
-# Overriding this retargets both bundles and both entitlement files at once.
-# The checked-in default is the only value the source falls back to.
-APP_GROUP="${APP_GROUP:-$(/usr/libexec/PlistBuddy -c "Print :DKAppGroupIdentifier" "$APP_INFO")}"
-
-if [ "$DISTRIBUTION" = "1" ] && [ "$IDENTITY" = "-" ]; then
-	echo "DISTRIBUTION=1 requires a Developer ID Application identity" >&2
-	exit 1
-fi
 
 read -r -a ARCH_LIST <<< "$ARCHS"
 if [ "${#ARCH_LIST[@]}" -eq 0 ]; then
@@ -63,10 +47,10 @@ for ARCH in "${ARCH_LIST[@]}"; do
 		*) echo "unsupported architecture: $ARCH" >&2; exit 1 ;;
 	esac
 	SCRATCH="$BUILD_ROOT/$ARCH"
-	swift build -c "$CONFIG" --triple "$ARCH-apple-macosx" --scratch-path "$SCRATCH" --product Dukou
+	swift build -c "$CONFIG" --triple "$ARCH-apple-macosx" --scratch-path "$SCRATCH" --product "$APP_EXECUTABLE"
 	swift build -c "$CONFIG" --triple "$ARCH-apple-macosx" --scratch-path "$SCRATCH" --product DukouShare
 	BIN_DIR="$(swift build -c "$CONFIG" --triple "$ARCH-apple-macosx" --scratch-path "$SCRATCH" --show-bin-path)"
-	for PRODUCT in Dukou DukouShare; do
+	for PRODUCT in "$APP_EXECUTABLE" DukouShare; do
 		if [ ! -x "$BIN_DIR/$PRODUCT" ]; then
 			echo "missing $PRODUCT executable for $ARCH: $BIN_DIR/$PRODUCT" >&2
 			exit 1
@@ -76,7 +60,7 @@ for ARCH in "${ARCH_LIST[@]}"; do
 			exit 1
 		fi
 	done
-	APP_BINARIES+=("$BIN_DIR/Dukou")
+	APP_BINARIES+=("$BIN_DIR/$APP_EXECUTABLE")
 	SHARE_BINARIES+=("$BIN_DIR/DukouShare")
 	BIN_DIRS+=("$BIN_DIR")
 done
@@ -100,7 +84,7 @@ fi
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Frameworks" "$APP/Contents/Resources" "$APP/Contents/PlugIns"
 
-lipo -create "${APP_BINARIES[@]}" -output "$APP/Contents/MacOS/Dukou"
+lipo -create "${APP_BINARIES[@]}" -output "$APP/Contents/MacOS/$APP_EXECUTABLE"
 ditto "$SPARKLE_FRAMEWORK" "$APP/Contents/Frameworks/Sparkle.framework"
 for ARCH in "${ARCH_LIST[@]}"; do
 	if ! lipo -archs "$APP/Contents/Frameworks/Sparkle.framework/Versions/Current/Sparkle" | tr ' ' '\n' | grep -Fxq "$ARCH"; then
@@ -112,8 +96,8 @@ done
 # inherit Xcode's LD_RUNPATH_SEARCH_PATHS, so the conventional location is
 # added before any signature is created. Only the app: the extensions never
 # link Sparkle.
-if ! otool -l "$APP/Contents/MacOS/Dukou" | grep -Fq '@executable_path/../Frameworks'; then
-	install_name_tool -add_rpath '@executable_path/../Frameworks' "$APP/Contents/MacOS/Dukou"
+if ! otool -l "$APP/Contents/MacOS/$APP_EXECUTABLE" | grep -Fq '@executable_path/../Frameworks'; then
+	install_name_tool -add_rpath '@executable_path/../Frameworks' "$APP/Contents/MacOS/$APP_EXECUTABLE"
 fi
 SHARE_BINARY="$BUILD_ROOT/DukouShare"
 lipo -create "${SHARE_BINARIES[@]}" -output "$SHARE_BINARY"
@@ -122,7 +106,19 @@ cp "$APP_INFO" "$APP/Contents/Info.plist"
 printf 'APPL????' > "$APP/Contents/PkgInfo"
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" "$APP/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD_NUMBER" "$APP/Contents/Info.plist"
-/usr/libexec/PlistBuddy -c "Set :DKAppGroupIdentifier $APP_GROUP" "$APP/Contents/Info.plist"
+
+for KEY in RepositoryURL MaintainerName MaintainerURL; do
+	VALUE="$(/usr/libexec/PlistBuddy -c "Print :$KEY" "$PROJECT_INFO")"
+	/usr/libexec/PlistBuddy -c "Add :XA$KEY string $VALUE" "$APP/Contents/Info.plist"
+done
+AUTOMATIC_UPDATES="$(/usr/libexec/PlistBuddy -c 'Print :AutomaticUpdatesEnabled' "$PROJECT_INFO")"
+/usr/libexec/PlistBuddy -c "Set :SUEnableAutomaticChecks $AUTOMATIC_UPDATES" "$APP/Contents/Info.plist"
+if [ "$AUTOMATIC_UPDATES" = "true" ]; then
+	UPDATE_BASE="$(/usr/libexec/PlistBuddy -c 'Print :UpdateBaseURL' "$PROJECT_INFO")"
+	UPDATE_KEY="$(/usr/libexec/PlistBuddy -c 'Print :UpdatePublicEDKey' "$PROJECT_INFO")"
+	/usr/libexec/PlistBuddy -c "Add :SUFeedURL string ${UPDATE_BASE}appcast.xml" "$APP/Contents/Info.plist"
+	/usr/libexec/PlistBuddy -c "Add :SUPublicEDKey string $UPDATE_KEY" "$APP/Contents/Info.plist"
+fi
 
 APP_ID="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP_INFO")"
 APPEX_PATHS=()
@@ -144,7 +140,6 @@ for SLOT_ROW in "${SHARE_SLOTS[@]}"; do
 	/usr/libexec/PlistBuddy -c "Set :DKShareAction $SLOT_ACTION" "$PLIST"
 	/usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" "$PLIST"
 	/usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD_NUMBER" "$PLIST"
-	/usr/libexec/PlistBuddy -c "Set :DKAppGroupIdentifier $APP_GROUP" "$PLIST"
 
 	SLOT_LOCALIZATIONS="$ROOT/Resources/ShareLocalizations/$SLOT"
 	if [ ! -d "$SLOT_LOCALIZATIONS" ]; then
@@ -152,19 +147,6 @@ for SLOT_ROW in "${SHARE_SLOTS[@]}"; do
 		exit 1
 	fi
 	APPEX_PATHS+=("$SLOT_APPEX")
-done
-
-# Entitlements are copied and rewritten rather than edited in place: a build
-# with APP_GROUP set must not leave the repository's files modified.
-BUILT_ENTITLEMENTS="$BUILD_ROOT/entitlements"
-mkdir -p "$BUILT_ENTITLEMENTS"
-for PAIR in "Dukou:$APP_ENTITLEMENTS" "DukouShare:$SHARE_ENTITLEMENTS"; do
-	NAME="${PAIR%%:*}"
-	SOURCE="${PAIR#*:}"
-	cp "$SOURCE" "$BUILT_ENTITLEMENTS/$NAME.entitlements"
-	/usr/libexec/PlistBuddy -c \
-		"Set :com.apple.security.application-groups:0 $APP_GROUP" \
-		"$BUILT_ENTITLEMENTS/$NAME.entitlements"
 done
 
 # Bundle.main must own localisations. SwiftPM's Bundle.module points back into
@@ -200,7 +182,7 @@ ditto "$ROOT/Resources/Licenses" "$APP/Contents/Resources/Licenses"
 # Repository fallbacks are useful for `swift run`, but a distributable binary
 # must never reveal the builder's absolute checkout path.
 if [ "$CONFIG" = "release" ]; then
-	RELEASE_BINARIES=("$APP/Contents/MacOS/Dukou")
+	RELEASE_BINARIES=("$APP/Contents/MacOS/$APP_EXECUTABLE")
 	for SLOT_ROW in "${SHARE_SLOTS[@]}"; do
 		IFS='|' read -r _ APPEX_NAME _ _ _ <<< "$SLOT_ROW"
 		RELEASE_BINARIES+=("$APP/Contents/PlugIns/$APPEX_NAME.appex/Contents/MacOS/$APPEX_NAME")
@@ -231,46 +213,52 @@ codesign "${SIGN_FLAGS[@]}" "$SPARKLE_VERSION/Autoupdate"
 codesign "${SIGN_FLAGS[@]}" "$SPARKLE_VERSION/Updater.app"
 codesign "${SIGN_FLAGS[@]}" "$SPARKLE"
 for SLOT_APPEX in "${APPEX_PATHS[@]}"; do
-	codesign "${SIGN_FLAGS[@]}" --entitlements "$BUILT_ENTITLEMENTS/DukouShare.entitlements" "$SLOT_APPEX"
+	codesign "${SIGN_FLAGS[@]}" --entitlements "$SHARE_ENTITLEMENTS" "$SLOT_APPEX"
 done
-codesign "${SIGN_FLAGS[@]}" --entitlements "$BUILT_ENTITLEMENTS/Dukou.entitlements" "$APP"
+codesign "${SIGN_FLAGS[@]}" --entitlements "$APP_ENTITLEMENTS" "$APP"
 
 codesign --verify --deep --strict --verbose=2 "$APP"
 
-# The single most common way this bundle breaks is the two halves drifting onto
-# different app groups, which produces an app that receives nothing and no error
-# anywhere. Read it back out of the signatures, not out of the source files.
-# PlistBuddy rather than `plutil -extract`: its key paths are colon-separated,
-# so an entitlement key full of dots does not have to be escaped.
-signed_app_group() {
+if [ "$DISTRIBUTION" = "1" ]; then
+	for BUNDLE in "$APP" "${APPEX_PATHS[@]}"; do
+		SIGNED_TEAM="$(codesign -d --verbose=4 "$BUNDLE" 2>&1 | sed -n 's/^TeamIdentifier=//p')"
+		if [ "$SIGNED_TEAM" != "$TEAM_ID" ]; then
+			echo "signed team for $BUNDLE is $SIGNED_TEAM, expected $TEAM_ID" >&2
+			exit 1
+		fi
+	done
+fi
+
+# Verify the extension's actual signature grants access to the shared Downloads
+# inbox. No bundle may claim the retired App Group.
+verify_inbox_entitlements() {
 	local dump
 	dump="$(mktemp "$BUILD_ROOT/entitlements.XXXXXX.plist")"
 	codesign -d --entitlements - --xml "$1" 2>/dev/null > "$dump"
-	/usr/libexec/PlistBuddy -c 'Print :com.apple.security.application-groups:0' "$dump"
-	rm -f "$dump"
-}
-APP_GROUP_SIGNED="$(signed_app_group "$APP")"
-if [ "$APP_GROUP_SIGNED" != "$APP_GROUP" ]; then
-	echo "signed app group for the app is $APP_GROUP_SIGNED, expected $APP_GROUP" >&2
-	exit 1
-fi
-for SLOT_APPEX in "${APPEX_PATHS[@]}"; do
-	SHARE_GROUP_SIGNED="$(signed_app_group "$SLOT_APPEX")"
-	if [ "$SHARE_GROUP_SIGNED" != "$APP_GROUP" ]; then
-		echo "signed app group for $(basename "$SLOT_APPEX") is $SHARE_GROUP_SIGNED, expected $APP_GROUP" >&2
+	if /usr/libexec/PlistBuddy -c 'Print :com.apple.security.application-groups' "$dump" >/dev/null 2>&1; then
+		echo "$1 still declares the retired App Group" >&2
 		exit 1
 	fi
+	if [ "$2" = "extension" ]; then
+		if [ "$(/usr/libexec/PlistBuddy -c 'Print :com.apple.security.files.downloads.read-write' "$dump")" != "true" ]; then
+			echo "$1 cannot write the Downloads inbox" >&2
+			exit 1
+		fi
+	fi
+	rm -f "$dump"
+}
+verify_inbox_entitlements "$APP" app
+for SLOT_APPEX in "${APPEX_PATHS[@]}"; do
+	verify_inbox_entitlements "$SLOT_APPEX" extension
 done
 
 echo "built $APP"
 echo "version $VERSION ($BUILD_NUMBER)"
-echo "app group $APP_GROUP"
+echo "inbox ~/Downloads/xiaoai-archive/Inbox"
 echo "share entries ${#APPEX_PATHS[@]}"
-echo "architectures $(lipo -archs "$APP/Contents/MacOS/Dukou")"
+echo "architectures $(lipo -archs "$APP/Contents/MacOS/$APP_EXECUTABLE")"
 if [ "$DISTRIBUTION" = "1" ]; then
 	echo "signed for Developer ID distribution"
-elif [ "$IDENTITY" = "-" ]; then
-	echo "signed ad-hoc — macOS will ask for Accessibility again after each rebuild"
 else
-	echo "signed with a stable identity, so granted permissions survive a rebuild"
+	echo "signed with the fixed project identity $IDENTITY"
 fi

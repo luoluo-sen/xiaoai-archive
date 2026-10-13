@@ -67,7 +67,8 @@ public enum WeChatExportArchive {
         catch is CancellationError { throw CancellationError() }
         catch { transcript = nil }
         guard !requiringRecords || transcript?.records?.isEmpty == false else { return }
-        let name = ForwardArchiveName.make(source: chat, count: transcript?.records?.count ?? fallbackCount,
+        let name = ForwardArchiveName.make(source: chat,
+                                           count: ForwardArchiveName.reportedCount(parsed: transcript?.records?.count, fallback: fallbackCount),
                                            start: transcript?.start, end: transcript?.end, part: part, exportedAt: exportedAt)
         guard item.displayName != name else { return }
         let destination = item.url.deletingLastPathComponent().appendingPathComponent(name)
@@ -120,7 +121,7 @@ public enum WeChatExportArchive {
             try checkCancellation()
             let (_, data) = try source(batch)
             let transcript = try WeChatNativeArchive.transcript(data, checkCancellation: checkCancellation)
-            let batchCount = transcript?.records?.count ?? fallbackCounts[index]
+            let batchCount = ForwardArchiveName.reportedCount(parsed: transcript?.records?.count, fallback: fallbackCounts[index]) ?? 0
             let sum = count.addingReportingOverflow(batchCount)
             guard batchCount >= 0, !sum.overflow else { throw Failure.mergeFailed }
             count = sum.partialValue
@@ -237,6 +238,112 @@ public enum WeChatExportArchive {
                              "-C", payload.path, "--", "聊天记录.txt", "batches"]
         if htmlPreview { process.arguments?.append("index.html") }
         if markdown { process.arguments?.append(WeChatMarkdown.fileName) }
+        process.currentDirectoryURL = work
+        process.environment = ["PATH": "/usr/bin:/bin", "LANG": "en_US.UTF-8", "LC_ALL": "en_US.UTF-8",
+                               "TMPDIR": work.path + "/", "COPYFILE_DISABLE": "1"]
+        process.standardInput = FileHandle.nullDevice
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        try checkCancellation()
+        try process.run()
+        defer {
+            if process.isRunning {
+                process.terminate()
+                let deadline = ProcessInfo.processInfo.systemUptime + 0.2
+                while process.isRunning, ProcessInfo.processInfo.systemUptime < deadline { Thread.sleep(forTimeInterval: 0.01) }
+                if process.isRunning { Darwin.kill(process.processIdentifier, SIGKILL) }
+            }
+            process.waitUntilExit()
+        }
+        while process.isRunning {
+            try checkCancellation()
+            Thread.sleep(forTimeInterval: 0.02)
+        }
+        process.waitUntilExit()
+        try checkCancellation()
+        guard process.terminationReason == .exit, process.terminationStatus == 0 else { throw Failure.mergeFailed }
+    }
+
+    /// A new archive of the messages after a confirmed overlap. The source
+    /// batches stay where they were exported; this file is the only one that
+    /// should be delivered.
+    public static func trim(_ batches: [ReadyBatch], dropPrefix: Int, chat: String, in inbox: Inbox,
+                            exportedAt: Date = Date(), checkCancellation: () throws -> Void = {}) throws -> URL {
+        try checkCancellation()
+        guard dropPrefix >= 0, !batches.isEmpty else { throw Failure.mergeFailed }
+        var sourced: [(record: WeChatTranscriptRecord, batch: Int)] = []
+        for (index, batch) in batches.enumerated() {
+            let (_, data) = try source(batch)
+            guard let records = try WeChatNativeArchive.transcript(data, checkCancellation: checkCancellation)?.records else { throw Failure.mergeFailed }
+            sourced += records.map { ($0, index) }
+        }
+        guard dropPrefix <= sourced.count else { throw Failure.mergeFailed }
+        let retained = sourced.dropFirst(dropPrefix)
+        let staging = try BatchStaging.create(in: inbox)
+        defer { staging.discard() }
+        let work = staging.directory.appendingPathComponent("trim-work", isDirectory: true)
+        let payload = work.appendingPathComponent("payload", isDirectory: true)
+        try FileManager.default.createDirectory(at: payload, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        var extracts: [URL] = []
+        for (index, batch) in batches.enumerated() {
+            try checkCancellation()
+            let folder = work.appendingPathComponent("src-\(index)", isDirectory: true)
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+            let (_, data) = try source(batch)
+            _ = try WeChatNativeArchive.extract(data, to: folder, checkCancellation: checkCancellation)
+            extracts.append(folder)
+        }
+        var copied = Set<String>()
+        for item in retained {
+            let folder = extracts[item.batch]
+            let paths = try FileManager.default.subpathsOfDirectory(atPath: folder.path).filter {
+                var isDirectory: ObjCBool = false
+                let full = folder.appendingPathComponent($0).path
+                return FileManager.default.fileExists(atPath: full, isDirectory: &isDirectory) && !isDirectory.boolValue
+            }
+            let available = Set(paths)
+            let byName = Dictionary(grouping: paths, by: { ($0 as NSString).lastPathComponent })
+            for line in item.record.text.components(separatedBy: .newlines) {
+                guard let named = WeChatAttachmentKind.attachment(in: line, paths: available, byName: byName), copied.insert(named.path).inserted else { continue }
+                let source = folder.appendingPathComponent(named.path)
+                let destination = payload.appendingPathComponent(named.path)
+                try FileManager.default.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+                try FileManager.default.copyItem(at: source, to: destination)
+            }
+        }
+        let formatter = DateFormatter()
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = .current
+        formatter.dateFormat = "yyyy年M月d日 HH:mm"
+        let body = retained.map { "·\($0.record.sender)\n\(formatter.string(from: $0.record.date))\n\($0.record.text)\n" }.joined(separator: "\n")
+        try Data(body.utf8).write(to: payload.appendingPathComponent("聊天记录.txt"), options: .atomic)
+        let count = retained.count
+        let dates = retained.map(\.record.date)
+        let name = ForwardArchiveName.make(source: chat, count: count, start: dates.min(), end: dates.max(), exportedAt: exportedAt)
+        let itemID = UUID()
+        let archive = try staging.destination(for: itemID, displayName: name)
+        try compressMembers(payload, to: archive, work: work, checkCancellation: checkCancellation)
+        try FileManager.default.removeItem(at: work)
+        let attributes = try FileManager.default.attributesOfItem(atPath: archive.path)
+        guard let bytes = attributes[.size] as? NSNumber, bytes.int64Value > 0 else { throw Failure.mergeFailed }
+        let item = ManifestItem(id: itemID, displayName: name, relativePath: staging.relativePath(for: itemID, displayName: name),
+                                contentType: "public.zip-archive", byteCount: bytes.int64Value,
+                                itemIndex: 0, attachmentIndex: 0, loadStrategy: .fileURL)
+        let manifest = BatchManifest(batchID: staging.batchID, createdAt: exportedAt, items: [item], action: .shelf)
+        try checkCancellation()
+        return try staging.commit(manifest: manifest, diagnostics: nil, intent: nil, in: inbox)
+    }
+
+    private static func compressMembers(_ payload: URL, to archive: URL, work: URL, checkCancellation: () throws -> Void) throws {
+        let names = try FileManager.default.contentsOfDirectory(atPath: payload.path).sorted()
+        guard names.contains("聊天记录.txt") else { throw Failure.mergeFailed }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/tar")
+        process.arguments = ["-c", "--format=zip", "--options=zip:hdrcharset=UTF-8", "-f", archive.path,
+                             "--no-mac-metadata", "--no-xattrs", "--no-acls", "--no-fflags",
+                             "--uid", "0", "--gid", "0", "--uname", "", "--gname", "",
+                             "-C", payload.path, "--"] + names
         process.currentDirectoryURL = work
         process.environment = ["PATH": "/usr/bin:/bin", "LANG": "en_US.UTF-8", "LC_ALL": "en_US.UTF-8",
                                "TMPDIR": work.path + "/", "COPYFILE_DISABLE": "1"]

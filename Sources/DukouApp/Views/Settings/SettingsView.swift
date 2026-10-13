@@ -181,8 +181,9 @@ struct SettingsView: View {
         case .wechat:
             QuickForwardFooter(
                 isBusy: wechat.isBusy, canRun: wechat.canRun, savesToFolder: wechat.draft.destinationFolder != nil,
-                status: wechat.status, error: wechat.error, elapsedSeconds: wechat.elapsedSeconds,
-                identifierPrefix: "wechat", onStart: { wechat.start() }, onCancel: { wechat.cancel() }
+                status: wechat.progressStatus, error: wechat.error, elapsedSeconds: wechat.elapsedSeconds,
+                identifierPrefix: "wechat", startTitle: wechat.startTitle,
+                onStart: { wechat.start() }, onCancel: { wechat.cancel() }
             )
         case .moments:
             QuickForwardFooter(

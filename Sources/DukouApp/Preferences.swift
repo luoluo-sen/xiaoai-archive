@@ -45,6 +45,7 @@ final class Preferences: ObservableObject {
         static let hasShownShelfCoachMark = "dev.dukou.hasShownShelfCoachMark"
         static let prompt = "dev.dukou.attachedPrompt"
         static let chatMemory = "dev.dukou.chatMemory"
+        static let archiveCheckpoints = "dev.dukou.archiveCheckpoints"
         static let showDockIcon = "dev.dukou.showDockIcon"
     }
 
@@ -82,6 +83,8 @@ final class Preferences: ObservableObject {
             )
         chatMemory = defaults.data(forKey: Key.chatMemory)
             .flatMap { try? JSONDecoder().decode(ChatMemories.self, from: $0) } ?? ChatMemories()
+        archiveCheckpoints = defaults.data(forKey: Key.archiveCheckpoints)
+            .flatMap { try? JSONDecoder().decode(WeChatArchiveCheckpoints.self, from: $0) } ?? WeChatArchiveCheckpoints()
     }
 
     /// Set only by finishing the guide. Closing its window half way through is
@@ -150,6 +153,14 @@ final class Preferences: ObservableObject {
         didSet {
             guard let data = try? JSONEncoder().encode(chatMemory) else { return }
             defaults.set(data, forKey: Key.chatMemory)
+        }
+    }
+
+    /// Per chat, the newest archived message sequence. Not the prompt cursor.
+    @Published var archiveCheckpoints: WeChatArchiveCheckpoints {
+        didSet {
+            guard let data = try? JSONEncoder().encode(archiveCheckpoints) else { return }
+            defaults.set(data, forKey: Key.archiveCheckpoints)
         }
     }
 

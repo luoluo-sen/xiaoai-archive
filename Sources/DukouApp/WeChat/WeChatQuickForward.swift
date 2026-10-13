@@ -12,8 +12,11 @@ final class WeChatQuickForward: ObservableObject {
     @Published private(set) var isReadingChatList = false
     @Published private(set) var chatList: WeChatChatList?
     @Published private(set) var chatListError: String?
+    @Published private(set) var batchMode = false
+    @Published private(set) var batchAmountText = "100"
+    @Published private(set) var batchRows: [WeChatBatchRow] = []
     @Published private(set) var status: String? {
-        didSet { if isBusy, let status { hud.update(status: status) } }
+        didSet { if isBusy, let status { hud.update(status: displayedStatus(status)) } }
     }
     @Published private(set) var error: String?
     @Published private(set) var elapsedSeconds: Double?
@@ -31,6 +34,7 @@ final class WeChatQuickForward: ObservableObject {
     private var lastFolder: URL?
     private var lastTarget: (id: String, name: String, pastePath: Bool)?
     private var statusExpiry: Task<Void, Never>?
+    private var batchPrefix: String?
     private var observers = Set<AnyCancellable>()
     /// Only a full forward raises it. `readCurrentChat` is one AX read with no
     /// synthesized input, so there is nothing to keep the user's hands off.
@@ -57,8 +61,108 @@ final class WeChatQuickForward: ObservableObject {
     }
 
     var canRun: Bool {
-        !isBusy && !isReadingChat && !isReadingChatList && !otherAutomationIsBusy() && !WeChatForwardPreset.normalizedChat(draft.chat).isEmpty && draft.range.isAvailableForAutomation &&
-        (draft.destinationFolder.map(\.isFileURL) ?? applications.contains { $0.id == draft.targetBundleIdentifier })
+        guard !isBusy, !isReadingChat, !isReadingChatList, !otherAutomationIsBusy(),
+              draft.destinationFolder.map(\.isFileURL) ?? applications.contains(where: { $0.id == draft.targetBundleIdentifier }) else { return false }
+        if !batchMode {
+            return !WeChatForwardPreset.normalizedChat(draft.chat).isEmpty && draft.range.isAvailableForAutomation
+        }
+        let pending = batchRows.filter { $0.isSelected && $0.state != .completed }
+        return !pending.isEmpty && pending.allSatisfy { batchCount(id: $0.id) != nil && uniqueBatchChat($0.chat) }
+    }
+
+    var selectedBatchCount: Int { batchRows.filter(\.isSelected).count }
+    var canResumeBatch: Bool {
+        batchRows.contains { $0.isSelected && ($0.state == .failed || $0.state == .cancelled) } ||
+        (batchRows.contains { $0.isSelected && $0.state == .completed } &&
+         batchRows.contains { $0.isSelected && $0.state == .waiting })
+    }
+    var startTitle: String {
+        if !batchMode { return draft.destinationFolder == nil ? L10n.text("开始转发") : L10n.text("开始保存") }
+        if canResumeBatch { return L10n.text("继续未完成的群聊") }
+        return draft.destinationFolder == nil ? L10n.text("开始批量转发") : L10n.text("开始批量保存")
+    }
+    var progressStatus: String? { status.map(displayedStatus) }
+
+    func setBatchMode(_ enabled: Bool) {
+        guard !isBusy, !isReadingChat, !isReadingChatList else { return }
+        batchMode = enabled
+        error = nil; status = nil
+    }
+
+    func setBatchAmount(_ text: String) {
+        guard !isBusy else { return }
+        let digits = WeChatForwardRange.digits(text, preserveZero: true)
+        guard digits != batchAmountText else { return }
+        batchAmountText = digits
+        for index in batchRows.indices where batchRows[index].countText.isEmpty {
+            resetBatchRow(at: index)
+        }
+        error = nil
+    }
+
+    func batchCount(id: String) -> Int? {
+        guard let row = batchRows.first(where: { $0.id == id }),
+              let count = Int(row.countText.isEmpty ? batchAmountText : row.countText), count >= 0 else { return nil }
+        return count
+    }
+
+    func setBatchSelected(id: String, selected: Bool) {
+        guard !isBusy, let index = batchRows.firstIndex(where: { $0.id == id }) else { return }
+        guard batchRows[index].isSelected != selected else { return }
+        batchRows[index].isSelected = selected
+        if selected { resetBatchRow(at: index) }
+        error = nil
+    }
+
+    func setBatchCount(id: String, text: String) {
+        guard !isBusy, let index = batchRows.firstIndex(where: { $0.id == id }) else { return }
+        let digits = WeChatForwardRange.digits(text, preserveZero: true)
+        guard digits != batchRows[index].countText else { return }
+        batchRows[index].countText = digits
+        resetBatchRow(at: index)
+        error = nil
+    }
+
+    func selectAllBatchRows(_ selected: Bool) {
+        guard !isBusy else { return }
+        for index in batchRows.indices {
+            batchRows[index].isSelected = selected
+            if selected { resetBatchRow(at: index) }
+        }
+        error = nil
+    }
+
+    func applyBatchAmount() {
+        guard !isBusy, let count = Int(batchAmountText), count >= 0 else { return }
+        for index in batchRows.indices where batchRows[index].isSelected {
+            batchRows[index].countText = ""
+            resetBatchRow(at: index)
+        }
+        error = nil
+    }
+
+    func useBatchRow(id: String) {
+        guard !isBusy, let row = batchRows.first(where: { $0.id == id }), let count = batchCount(id: id) else { return }
+        batchMode = false
+        draft.chat = row.chat
+        draft.range = .init(unit: .messages, value: count)
+        error = nil; status = nil
+    }
+
+    private func resetBatchRow(at index: Int) {
+        batchRows[index].state = .waiting
+        batchRows[index].detail = nil
+    }
+
+    private func uniqueBatchChat(_ name: String) -> Bool {
+        let normalized = WeChatForwardPreset.normalizedChat(name)
+        return !normalized.isEmpty && batchRows.filter {
+            WeChatForwardPreset.normalizedChat($0.chat) == normalized
+        }.count == 1
+    }
+
+    private func displayedStatus(_ message: String) -> String {
+        batchPrefix.map { $0 + " · " + message } ?? message
     }
     func refreshApplications() {
         applications = RunningApp.current(excluding: [Bundle.main.bundleIdentifier ?? "dev.dukou.Dukou", WeChatAccessibility.bundleIdentifier, "com.apple.finder"])
@@ -117,15 +221,20 @@ final class WeChatQuickForward: ObservableObject {
         guard !isBusy, draft.destinationFolder == nil else { return }
         if let lastFolder { save(to: lastFolder) } else { chooseFolder() }
     }
-    func use(_ preset: WeChatForwardPreset) { guard !isBusy else { return }; draft = preset; error = nil }
+    func use(_ preset: WeChatForwardPreset) { guard !isBusy else { return }; batchMode = false; draft = preset; error = nil }
     /// The amount field's text. Held as a count, shown as digits, and filtered
     /// on the way in so the field can never carry something the range cannot be
     /// made of. Empty reads as zero, which the form marks invalid rather than
     /// silently correcting.
-    var amountText: String { draft.range.value > 0 ? String(draft.range.value) : "" }
+    /// Zero stays visible as "0": it is the whole-conversation mode, not an
+    /// empty field, and erasing it on the way out would make the field fight
+    /// the user typing it.
+    var amountText: String {
+        draft.range.isUnlimited ? "0" : draft.range.value > 0 ? String(draft.range.value) : ""
+    }
     func setAmount(_ text: String) {
         guard !isBusy else { return }
-        draft.range.value = Int(WeChatForwardRange.digits(text)) ?? 0
+        draft.range.value = Int(WeChatForwardRange.digits(text, preserveZero: true)) ?? 0
     }
     func useMessageCount() {
         guard !isBusy else { return }
@@ -159,6 +268,7 @@ final class WeChatQuickForward: ObservableObject {
         guard !isBusy, !isReadingChat, !isReadingChatList, !otherAutomationIsBusy() else { return }
         chatList = nil
         chatListError = nil
+        batchRows = []
         authorization.refresh()
         guard authorization.isTrusted else {
             chatListError = WeChatChatListReader.Failure.permissionRequired.localizedDescription
@@ -172,6 +282,7 @@ final class WeChatQuickForward: ObservableObject {
                     Self.worker.async { continuation.resume(with: Result { try WeChatChatListReader.read() }) }
                 }
                 chatList = result
+                batchRows = result.entries.map { WeChatBatchRow(id: $0.id, chat: $0.name, isConfirmedGroup: $0.isConfirmedGroup) }
             } catch {
                 chatListError = error.localizedDescription
             }
@@ -189,36 +300,57 @@ final class WeChatQuickForward: ObservableObject {
 
     func start(_ saved: WeChatForwardPreset? = nil) {
         guard !isBusy, !isReadingChat, !isReadingChatList, !otherAutomationIsBusy() else { return }
-        if let saved { draft = saved }
+        if let saved { batchMode = false; draft = saved }
+        refreshApplications()
+        if batchMode {
+            guard canRun else {
+                error = L10n.text("请勾选名称唯一的群聊，填写有效条数，并选择输出位置。")
+                return
+            }
+            let jobs = batchRows.filter { $0.isSelected && $0.state != .completed }.map { row in
+                var preset = draft
+                preset.chat = WeChatForwardPreset.normalizedChat(row.chat)
+                preset.range = .init(unit: .messages, value: batchCount(id: row.id)!)
+                preset.incremental = false
+                return (id: Optional(row.id), preset: preset)
+            }
+            startJobs(jobs)
+            return
+        }
         guard draft.range.unit == .messages else {
             status = nil
             error = WeChatAutomationError.timeRangeUnavailable.localizedDescription
             return
         }
-        refreshApplications()
         guard canRun else {
             error = L10n.text("请填写群名和有效范围，并选择一个正在运行的应用或文件夹。")
             return
         }
-        authorization.refresh()
-        guard authorization.isTrusted else { authorization.guideIfNeeded(); return }
+        if draft.incremental, preferences.archiveCheckpoints.checkpoint(for: draft.chat) == nil {
+            error = WeChatAutomationError.incrementNeedsBaseline.localizedDescription
+            return
+        }
         var preset = draft
         preset.chat = WeChatForwardPreset.normalizedChat(preset.chat)
+        startJobs([(id: nil, preset: preset)])
+    }
+
+    private func startJobs(_ jobs: [(id: String?, preset: WeChatForwardPreset)]) {
+        let first = jobs[0]
+        authorization.refresh()
+        guard authorization.isTrusted else { authorization.guideIfNeeded(); return }
+        guard model.inbox != nil else { error = InboxError.inboxUnavailable.localizedDescription; return }
         let targetPID: pid_t?
-        if preset.destinationFolder != nil {
-            preset.targetBundleIdentifier = ""
-            preset.targetName = ""
-            preset.pastePath = false
+        if first.preset.destinationFolder != nil {
             targetPID = nil
         } else {
-            guard let target = NSRunningApplication.runningApplications(withBundleIdentifier: preset.targetBundleIdentifier).first else { return }
-            preset.targetName = target.localizedName ?? preset.targetName
+            guard let target = NSRunningApplication.runningApplications(withBundleIdentifier: first.preset.targetBundleIdentifier).first else { return }
             targetPID = target.processIdentifier
         }
         let token = WeChatCancellation()
         cancellation = token
         isBusy = true; error = nil; elapsedSeconds = nil
-        let opening = preset.destinationFolder == nil ? L10n.text("等待开始微信转发…") : L10n.text("等待开始保存微信记录…")
+        let opening = first.preset.destinationFolder == nil ? L10n.text("等待开始微信转发…") : L10n.text("等待开始保存微信记录…")
         status = opening
         // The previous run's failure capsule is in the corner this is about to
         // take, and 再次执行 is usually clicked while it is still standing there.
@@ -231,8 +363,62 @@ final class WeChatQuickForward: ObservableObject {
         let requestedAt = Date()
         runner.enqueueExclusive { [weak self] in
             guard let self else { return }
-            await self.run(preset, targetPID: targetPID, requestedAt: requestedAt, token: token)
+            let started = ProcessInfo.processInfo.systemUptime
+            var activeID: String?
+            var deferredIntake = false
+            var completed = 0
+            defer {
+                self.hud.hide()
+                if deferredIntake { self.model.resumeIntake(); self.shelf.resumePresentation() }
+                self.elapsedSeconds = ProcessInfo.processInfo.systemUptime - started
+                self.cancellation = nil
+                self.isBusy = false
+                self.batchPrefix = nil
+                self.expireStatus()
+            }
+            do {
+                try token.check()
+                guard Date().timeIntervalSince(requestedAt) <= BatchIntent.freshnessWindow else { throw WeChatAutomationError.focusChanged }
+                self.model.deferIntake(); self.shelf.suspendPresentation(); deferredIntake = true
+                for (index, job) in jobs.enumerated() {
+                    try token.check()
+                    activeID = job.id
+                    if let id = job.id {
+                        self.updateBatchRow(id: id, state: .running, detail: nil)
+                        self.batchPrefix = L10n.format("第 %d/%d 个群 · %@", index + 1, jobs.count, job.preset.chat)
+                    }
+                    let result = try await self.run(job.preset, targetPID: targetPID, requestedAt: Date(), token: token)
+                    if let id = job.id { self.updateBatchRow(id: id, state: .completed, detail: result) }
+                    completed += 1
+                    activeID = nil
+                }
+                if first.id != nil {
+                    self.batchPrefix = nil
+                    self.status = L10n.format("批量完成 · 本次已处理 %d 个群聊", completed)
+                }
+                if let folder = first.preset.destinationFolder { NSWorkspace.shared.open(folder) }
+            } catch is CancellationError {
+                if let id = activeID { self.updateBatchRow(id: id, state: .cancelled, detail: L10n.text("已收到的文件保留在暂存架。")) }
+                self.status = L10n.text("已取消，已收到的文件保留在暂存架。")
+            } catch {
+                if let id = activeID { self.updateBatchRow(id: id, state: .failed, detail: error.localizedDescription) }
+                let prefix = self.batchPrefix.map { $0 + "：" } ?? ""
+                self.status = nil
+                let message = prefix + error.localizedDescription
+                self.error = message
+                self.hud.hide()
+                self.runner.notify(
+                    L10n.format("快捷微信转发失败：%@", message),
+                    action: ToastPresenter.Action(title: L10n.text("打开设置")) { [weak self] in self?.openSettings?(.wechat) }
+                )
+            }
         }
+    }
+
+    private func updateBatchRow(id: String, state: WeChatBatchState, detail: String?) {
+        guard let index = batchRows.firstIndex(where: { $0.id == id }) else { return }
+        batchRows[index].state = state
+        batchRows[index].detail = detail
     }
 
     /// A finished run's summary is news for a few seconds, not a fixture: the
@@ -250,18 +436,9 @@ final class WeChatQuickForward: ObservableObject {
         }
     }
 
-    private func run(_ preset: WeChatForwardPreset, targetPID: pid_t?, requestedAt: Date, token: WeChatCancellation) async {
-        let started = ProcessInfo.processInfo.systemUptime
-        var deferredIntake = false
-        defer {
-            hud.hide()
-            if deferredIntake { model.resumeIntake(); shelf.resumePresentation() }
-            elapsedSeconds = ProcessInfo.processInfo.systemUptime - started
-            cancellation = nil
-            isBusy = false
-            expireStatus()
-        }
-        do {
+    /// One capture-to-delivery operation. The caller owns queue lifetime and
+    /// receives errors before it can begin the next conversation.
+    private func run(_ preset: WeChatForwardPreset, targetPID: pid_t?, requestedAt: Date, token: WeChatCancellation) async throws -> String {
             try token.check()
             guard Date().timeIntervalSince(requestedAt) <= BatchIntent.freshnessWindow else { throw WeChatAutomationError.focusChanged }
             guard let inbox = model.inbox else { throw InboxError.inboxUnavailable }
@@ -271,9 +448,7 @@ final class WeChatQuickForward: ObservableObject {
                 }
             }
             let extensionURL = Bundle.main.bundleURL.appendingPathComponent("Contents/PlugIns/DukouShare.appex")
-            model.deferIntake()
-            shelf.suspendPresentation()
-            deferredIntake = true
+            let checkpoint = preset.incremental ? preferences.archiveCheckpoints.checkpoint(for: preset.chat) : nil
             let capture: WeChatCapture = try await withCheckedThrowingContinuation { continuation in
                 Self.worker.async {
                     continuation.resume(with: Result {
@@ -283,20 +458,41 @@ final class WeChatQuickForward: ObservableObject {
                             DispatchQueue.main.async { self?.status = message }
                         }
                         return try engine.capture(range: preset.range, ready: inbox.ready, shelfExtension: extensionURL,
-                                                  identifySelf: preset.htmlPreview)
+                                                  identifySelf: preset.htmlPreview, checkpoint: checkpoint)
                     })
                 }
             }
             try token.check()
             let reader = InboxReader(inbox: inbox)
-            guard capture.messageCount > 0 else {
-                status = L10n.text("这个时间范围内没有消息。")
-                return
+            if let cut = capture.increment, cut.retained == 0 {
+                let gathered = capture.directories.reversed().compactMap { reader.batch(at: $0) }
+                for batch in gathered { try reader.markConsumed(itemIDs: Set(batch.items.map(\.id)), in: batch.id) }
+                let note = L10n.text("没有新消息。检查点未改动。")
+                status = note
+                return note
             }
-            let originals = capture.directories.reversed().compactMap { reader.batch(at: $0) }
-            let counts = Array(capture.batchMessageCounts.reversed())
+            guard capture.messageCount > 0 else {
+                throw WeChatAutomationError.noMessages
+            }
+            var originals = capture.directories.reversed().compactMap { reader.batch(at: $0) }
+            var counts = Array(capture.batchMessageCounts.reversed())
+            let archivedRecords = Self.chronologicalRecords(in: originals.flatMap { $0.items.map(\.url) })
             guard !originals.isEmpty, originals.count == capture.directories.count, originals.count == counts.count,
                   originals.allSatisfy({ $0.items.count == 1 }) else { throw WeChatAutomationError.invalidArchive }
+            if let cut = capture.increment {
+                let trimmedURL: URL = try await withCheckedThrowingContinuation { continuation in
+                    Self.worker.async {
+                        continuation.resume(with: Result {
+                            try WeChatExportArchive.trim(originals, dropPrefix: cut.dropPrefix, chat: preset.chat, in: inbox,
+                                                         exportedAt: requestedAt, checkCancellation: token.check)
+                        })
+                    }
+                }
+                guard let trimmed = reader.batch(at: trimmedURL) else { throw WeChatAutomationError.invalidArchive }
+                for batch in originals { try reader.markConsumed(itemIDs: Set(batch.items.map(\.id)), in: batch.id) }
+                originals = [trimmed]
+                counts = [cut.retained]
+            }
             let merging = (preset.mergeArchives || preset.savesMarkdown) && originals.count > 1
             let removingMedia = !preset.saveImages || !preset.saveVideos
             let repackaging = merging || preset.htmlPreview || preset.savesMarkdown || removingMedia
@@ -347,6 +543,14 @@ final class WeChatQuickForward: ObservableObject {
                                                    plan: plan, checkCancellation: token.check)
                 if let prompt, let span { preferences.chatMemory.advance(preset.chat, prompt: prompt.id, to: span.end) }
             }
+            if let cut = capture.increment, let archivedRecords, archivedRecords.count >= cut.dropPrefix {
+                let added = Array(archivedRecords.dropFirst(cut.dropPrefix))
+                if added.count == cut.retained, !added.isEmpty {
+                    preferences.archiveCheckpoints.advance(preset.chat, by: added)
+                }
+            } else if capture.increment == nil, let archivedRecords {
+                preferences.archiveCheckpoints.replace(preset.chat, with: archivedRecords)
+            }
             // Delivery has committed. A late cancellation must not strand
             // saved files without their receipt or remembered destination.
             // Initialising only our own receipts above leaves other arrivals
@@ -361,35 +565,46 @@ final class WeChatQuickForward: ObservableObject {
             }
             stored.recordSuccess(preset)
             recent = stored.recent
-            draft = stored.draft
+            if batchPrefix == nil { draft = stored.draft }
+            else { stored.draft = draft }
             persist()
+            let summary: String
+            let shownCount = capture.increment?.retained ?? capture.messageCount
+            let requested = preset.range.isUnlimited || preset.incremental ? nil : preset.range.value
+            let historyNote = WeChatBatchBoundary.finishedShort(requested: requested, actual: shownCount, historyStartProved: capture.reachedHistoryStart)
+                ? L10n.text(" · 聊天记录已到开头") : nil
+            let boundaryNote = capture.boundaryStopped ? L10n.text("已保存已导出的记录。下一批的起点无法确认，已停止。") : nil
+            let warning: String?
             if preset.destinationFolder != nil {
                 // The folder's name, not its path: the bar has one line, and
                 // the folder itself opens beside it.
                 let folderName = preset.destinationFolder.map { $0.lastPathComponent.isEmpty ? $0.path : $0.lastPathComponent } ?? destinationName
-                status = preset.savesMarkdown
-                    ? L10n.format("已保存 Markdown 笔记到 %@ · 约 %d 条消息", folderName, capture.messageCount)
-                    : L10n.format("已保存 %d 个 ZIP 到 %@ · 约 %d 条消息", urls.count, folderName, capture.messageCount)
-                if !savedOutcome { error = L10n.text("文件已保存，但部分记录状态未能保存。") }
-                if let folder = preset.destinationFolder { NSWorkspace.shared.open(folder) }
+                summary = (preset.savesMarkdown
+                    ? L10n.format("已保存 Markdown 笔记到 %@ · 约 %d 条消息", folderName, shownCount)
+                    : L10n.format("已保存 %d 个 ZIP 到 %@ · 约 %d 条消息", urls.count, folderName, shownCount))
+                    + (historyNote ?? "")
+                let notes = [boundaryNote, savedOutcome ? nil : L10n.text("文件已保存，但部分记录状态未能保存。")].compactMap { $0 }
+                warning = notes.isEmpty ? nil : notes.joined(separator: "\n")
             } else {
-                status = L10n.format("已向 %@ 粘贴 %d 个 ZIP · 约 %d 条消息", preset.targetName, urls.count, capture.messageCount)
-                if !savedOutcome { error = L10n.text("粘贴已完成，但部分记录状态未能保存。") }
+                summary = L10n.format("已向 %@ 粘贴 %d 个 ZIP · 约 %d 条消息", preset.targetName, urls.count, shownCount) + (historyNote ?? "")
+                let notes = [boundaryNote, savedOutcome ? nil : L10n.text("粘贴已完成，但部分记录状态未能保存。")].compactMap { $0 }
+                warning = notes.isEmpty ? nil : notes.joined(separator: "\n")
             }
-        } catch is CancellationError {
-            status = L10n.text("已取消，已收到的文件保留在暂存架。")
-        } catch {
-            status = nil
-            self.error = error.localizedDescription
-            // 设置 is behind WeChat by now and usually closed altogether, so the
-            // failure is also said on the capsule the rest of Dukou uses.
-            hud.hide()
-            runner.notify(
-                L10n.format("快捷微信转发失败：%@", error.localizedDescription),
-                action: ToastPresenter.Action(title: L10n.text("打开设置")) { [weak self] in
-                    self?.openSettings?(.wechat)
-                }
-            )
+            status = summary
+            if let warning { error = warning }
+            return summary + (warning.map { "\n" + $0 } ?? "")
+    }
+
+    /// Oldest batch first. Nil when any ZIP cannot be read as messages: a
+    /// checkpoint must not be built from a partial timeline.
+    private static func chronologicalRecords(in urls: [URL]) -> [WeChatTranscriptRecord]? {
+        var records: [WeChatTranscriptRecord] = []
+        for url in urls {
+            guard url.pathExtension.lowercased() == "zip",
+                  let data = try? Data(contentsOf: url, options: .mappedIfSafe),
+                  let parsed = try? WeChatNativeArchive.transcript(data)?.records else { return nil }
+            records += parsed
         }
+        return records
     }
 }

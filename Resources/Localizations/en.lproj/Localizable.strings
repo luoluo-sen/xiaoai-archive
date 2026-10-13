@@ -237,6 +237,14 @@
 
 // WeChat selection recovery
 "微信消息列表尚未稳定。请等待加载完成后重试。" = "The WeChat message list has not settled. Wait for loading to finish, then try again.";
+"已保存已导出的记录。下一批的起点无法确认，已停止。" = "Saved the records already exported. The next batch's starting point could not be confirmed, so the run stopped.";
+"没有新消息。检查点未改动。" = "No new messages. The checkpoint was left unchanged.";
+"增量采集" = "Incremental archive";
+"从上次成功归档的末尾继续，只保存新消息。相同的分钟不会直接停。" = "Continue from the last successful archive and save only new messages. A matching minute does not stop the run.";
+"这个群还没有归档检查点。请先完整导出一次。" = "This chat has no archive checkpoint yet. Export it in full once first.";
+"未能确认和上次归档的重叠，已停止。原始文件已保留，检查点没有更新。" = "Could not confirm the overlap with the last archive, so the run stopped. The original files were kept and the checkpoint was not updated.";
+"历史边界无法确认。" = "The start of the chat history could not be confirmed.";
+" · 聊天记录已到开头" = " · Reached the start of the chat";
 "正在加载更早的聊天记录 · 已加载 %d 条" = "Loading earlier messages · %d loaded";
 "正在加载更早的聊天记录…" = "Loading earlier chat messages…";
 "正在选择消息 · 已导出约 %d 条" = "Selecting messages · about %d exported";
@@ -341,7 +349,10 @@
 "正在整理文件名…" = "Naming exported files…";
 "消息较多，建议合并以减少附件数量。" = "For this many messages, merge to reduce the attachment count.";
 "聊天记录合并失败，原始 ZIP 已保留在暂存架。" = "Could not merge chat records. The original ZIPs remain on the shelf.";
+"请输入大于或等于 0 的整数。" = "Enter an integer of 0 or greater.";
 "请输入大于 0 的整数。" = "Enter an integer greater than 0.";
+"条数为 0 表示导出这个群从第一条到最新的全部消息。" = "A count of 0 exports every message in this group, from the first to the newest.";
+"全部消息" = "All messages";
 "预计约 %@ 分 %@ 秒" = "About %@ min %@ sec";
 "预计约 %@ 分钟" = "About %@ min";
 "预计约 %@ 小时" = "About %@ hr";
@@ -425,3 +436,29 @@
 "请先启用至少一个分享入口。快捷微信转发需要「暂存到 xiaoai-archive」。" = "Enable at least one sharing entry. Quick WeChat forwarding requires Stash in xiaoai-archive.";
 "入口尚未启用" = "No entry enabled";
 "返回入口" = "Back to Entries";
+/* Batch WeChat forwarding */
+"执行方式" = "Mode";
+"单个群聊" = "Single Chat";
+"批量群聊" = "Batch Chats";
+"统一条数" = "Uniform Count";
+"每群最近" = "Latest per chat";
+"应用到所选群" = "Apply to Selected";
+"单群条数留空时使用统一值；应用到所选群会清除单群条数，并重置这些群的执行状态。" = "Leave individual counts blank to use the uniform count. Apply to Selected clears overrides and resets those chats' execution status.";
+"已选择 %d 个群聊" = "%d chats selected";
+"取消全选" = "Deselect All";
+"单群条数，留空使用统一条数。" = "Individual count; leave blank to use the uniform count.";
+"%@ 的消息条数" = "Message count for %@";
+"设为单群" = "Use as Single Chat";
+"勾选即确认该会话为群聊；同名会话无法自动区分，请先在微信中确认名称唯一。" = "Selecting a conversation confirms it is a group chat. Same-name conversations cannot be distinguished automatically; confirm unique names in WeChat first.";
+"先读取窗口列表，再勾选需要批量处理的群聊。" = "Read the window list first, then select the chats to process.";
+"每群合并为一个 ZIP" = "Merge each chat into one ZIP";
+"等待执行" = "Waiting";
+"正在处理" = "Processing";
+"失败，已暂停" = "Failed, paused";
+"继续未完成的群聊" = "Continue Unfinished Chats";
+"开始批量转发" = "Start Batch Forwarding";
+"开始批量保存" = "Start Batch Saving";
+"请勾选名称唯一的群聊，填写有效条数，并选择输出位置。" = "Select chats with unique names, enter valid counts, and choose an output destination.";
+"第 %d/%d 个群 · %@" = "Chat %d/%d · %@";
+"批量完成 · 本次已处理 %d 个群聊" = "Batch complete · %d chats processed in this run";
+"已收到的文件保留在暂存架。" = "Files already received remain on the shelf.";

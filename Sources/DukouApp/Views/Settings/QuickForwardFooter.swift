@@ -14,6 +14,7 @@ struct QuickForwardFooter: View {
     let error: String?
     let elapsedSeconds: Double?
     let identifierPrefix: String
+    var startTitle: String? = nil
     let onStart: () -> Void
     let onCancel: () -> Void
 
@@ -45,7 +46,7 @@ struct QuickForwardFooter: View {
                             .fixedSize()
                             .accessibilityIdentifier(identifierPrefix + ".cancel")
                     } else {
-                        Button(savesToFolder ? L10n.text("开始保存") : L10n.text("开始转发"), action: onStart)
+                        Button(startTitle ?? (savesToFolder ? L10n.text("开始保存") : L10n.text("开始转发")), action: onStart)
                             .buttonStyle(SettingsActionButtonStyle(primary: true))
                             .fixedSize()
                             .disabled(!canRun)

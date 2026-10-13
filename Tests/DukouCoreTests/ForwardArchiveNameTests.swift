@@ -38,6 +38,11 @@ final class ForwardArchiveNameTests: XCTestCase {
             XCTAssertEqual(make("群名", count: count), "群名_导出20260908-220000_条数未知.zip")
         }
         XCTAssertEqual(make("群名", count: 0), "群名_导出20260908-220000_0条.zip")
+        XCTAssertEqual(ForwardArchiveName.reportedCount(parsed: 0, fallback: 230), 230)
+        XCTAssertEqual(ForwardArchiveName.reportedCount(parsed: nil, fallback: 100), 100)
+        XCTAssertEqual(ForwardArchiveName.reportedCount(parsed: 40, fallback: 0), 40)
+        XCTAssertEqual(ForwardArchiveName.reportedCount(parsed: 0, fallback: 0), 0)
+        XCTAssertNil(ForwardArchiveName.reportedCount(parsed: nil, fallback: nil))
     }
 
     func testSuppliedTimeZoneAppliesToContentAndExportDates() {

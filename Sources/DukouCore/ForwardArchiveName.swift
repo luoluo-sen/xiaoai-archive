@@ -5,6 +5,16 @@ import Foundation
 public enum ForwardArchiveName {
     private static let maximumBytes = 200
 
+    /// The count printed on the file. A transcript that actually contains
+    /// messages wins. A parsed zero does not: choosing 0 asks for the whole
+    /// conversation, and an unread transcript is not an empty one. The number
+    /// selected or exported is then the count. Only a genuine zero stays zero.
+    public static func reportedCount(parsed: Int?, fallback: Int?) -> Int? {
+        if let parsed, parsed > 0 { return parsed }
+        if let fallback, fallback > 0 { return fallback }
+        return parsed ?? fallback
+    }
+
     public static func make(
         source: String,
         count: Int?,

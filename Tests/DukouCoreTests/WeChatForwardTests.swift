@@ -34,7 +34,7 @@ final class WeChatForwardTests: XCTestCase {
             XCTAssertTrue(range.isValid, "Count: \(count)")
             XCTAssertTrue(range.isAvailableForAutomation)
         }
-        for count in [0, -1, Int.min] {
+        for count in [-1, Int.min] {
             let range = WeChatForwardRange(unit: .messages, value: count)
             XCTAssertFalse(range.isValid)
             XCTAssertFalse(range.isAvailableForAutomation)
@@ -42,6 +42,30 @@ final class WeChatForwardTests: XCTestCase {
             XCTAssertNil(range.estimatedTimeTitle)
         }
         XCTAssertNil(WeChatForwardRange(unit: .messages, value: 10).start(at: Date()))
+    }
+
+    func testZeroCountMeansTheWholeConversation() {
+        let whole = WeChatForwardRange(unit: .messages, value: 0)
+        XCTAssertTrue(whole.isValid)
+        XCTAssertTrue(whole.isAvailableForAutomation)
+        XCTAssertTrue(whole.isUnlimited)
+        XCTAssertNil(whole.estimatedSeconds)
+        XCTAssertNil(whole.estimatedTimeTitle)
+        XCTAssertFalse(WeChatForwardRange(unit: .messages, value: 100).isUnlimited)
+        XCTAssertFalse(WeChatForwardRange(unit: .hours, value: 0).isUnlimited)
+        // The mode reaches the archive stage as several batches, so merging
+        // is recommended rather than resting on a threshold it cannot meet.
+        XCTAssertTrue(WeChatForwardPreset(chat: "g", range: whole).recommendsMergingArchives)
+    }
+
+    func testDigitsPreservesALoneZeroForTheCountMode() {
+        XCTAssertEqual(WeChatForwardRange.digits("0"), "0")
+        XCTAssertEqual(WeChatForwardRange.digits("0", preserveZero: true), "0")
+        XCTAssertEqual(WeChatForwardRange.digits("", preserveZero: true), "")
+        XCTAssertEqual(WeChatForwardRange.digits("00", preserveZero: true), "0")
+        XCTAssertEqual(WeChatForwardRange.digits("007", preserveZero: true), "7")
+        XCTAssertEqual(WeChatForwardRange.digits("200", preserveZero: true), "200")
+        XCTAssertEqual(WeChatForwardRange.digits("二00"), "200")
     }
 
     func testTimeRangesKeepTheirExistingLimitsAndHaveNoCountEstimate() {

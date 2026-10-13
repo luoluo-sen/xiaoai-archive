@@ -6,8 +6,9 @@ import Foundation
 import Vision
 
 enum WeChatAutomationError: Error, LocalizedError {
-    case notRunning, interfaceHidden, wrongChat, busyChat, focusChanged, historyIncomplete, noMessages
+    case notRunning, interfaceHidden, wrongChat, busyChat, focusChanged, historyIncomplete, historyUnconfirmed, noMessages
     case selection, loading, screenRecording, unsupportedLayout, missingShare, ambiguousReceipt, receiptTimeout, invalidArchive, timeRangeUnavailable
+    case incrementNeedsBaseline, incrementUnconfirmed
     case control(String)
 
     var errorDescription: String? {
@@ -18,6 +19,7 @@ enum WeChatAutomationError: Error, LocalizedError {
         case .busyChat: L10n.text("请先关闭微信的聊天记录窗口，或退出正在进行的多选、转发。")
         case .focusChanged: L10n.text("前台应用或群聊发生了变化，已停止微信操作。")
         case .historyIncomplete: L10n.text("未能读到范围起点。请缩小范围，或先在微信中加载更早的聊天记录。")
+        case .historyUnconfirmed: L10n.text("历史边界无法确认。")
         case .noMessages: L10n.text("这个时间范围内没有消息。")
         case .selection: L10n.text("无法准确选中这一批消息，已停止。请缩小范围后重试。")
         case .loading: L10n.text("微信消息列表尚未稳定。请等待加载完成后重试。")
@@ -28,6 +30,8 @@ enum WeChatAutomationError: Error, LocalizedError {
         case .receiptTimeout: L10n.text("等待微信导出超时。已收到的文件会保留在暂存架。")
         case .invalidArchive: L10n.text("微信导出的文件为空或无法完整读取，文件已保留。")
         case .timeRangeUnavailable: L10n.text("按时间选取暂未开放，请改用条数。")
+        case .incrementNeedsBaseline: L10n.text("这个群还没有归档检查点。请先完整导出一次。")
+        case .incrementUnconfirmed: L10n.text("未能确认和上次归档的重叠，已停止。原始文件已保留，检查点没有更新。")
         case .control(let label): L10n.format("微信没有显示“%@”。请回到普通聊天窗口后重试。", label)
         }
     }
@@ -93,6 +97,15 @@ struct WeChatCapture: Sendable {
     let readSeconds: Double
     let captureSeconds: Double
     let selfSender: String?
+    /// Exported batches are kept, and no further batch was started: the next
+    /// boundary was not proved. A finished request does not set this.
+    let boundaryStopped: Bool
+    /// The walk proved it had reached the conversation's first message, so a
+    /// request larger than the conversation finished with what was there.
+    let reachedHistoryStart: Bool
+    /// Set only for an incremental run that found a unique overlap. Nil on a
+    /// ordinary export. `retained == 0` means nothing new was appended.
+    let increment: WeChatIncrementCut?
 }
 
 final class WeChatAccessibility {
@@ -153,6 +166,17 @@ final class WeChatAccessibility {
     private var prefetchRows = 0
     private var prefetchLoaded = 0
     private var snapshots: [[String: Any]] = []
+    /// Written the moment a keyboard walk finishes its count, before the page
+    /// is asked to settle. A later snapshot failure must not look like the
+    /// walk never arrived.
+    private var keyboardTargetReached = false
+    private var keyboardTarget: WeChatFocusedMessage?
+    private var keyboardTargetElement: AXUIElement?
+    private var focusedMessageLog: [String: Any] = [:]
+    private var snapshotRejectReason = ""
+    private var recoveryAttempts: [[String: Any]] = []
+    private var rangeControlState = ""
+    private var boundaryStopped = false
 
     init(chat: String, cancellation: WeChatCancellation, progress: @escaping (String) -> Void) throws {
         guard AXIsProcessTrusted() else { throw AutoPaste.Failure.notTrusted }
@@ -593,8 +617,16 @@ final class WeChatAccessibility {
         }
     }
 
+    private struct ListSample {
+        let list: WCNode
+        let rows: [WCNode]
+        let reject: WeChatSnapshotReject?
+    }
+
     /// Require two equal materialized snapshots. An empty/loading AX page is
     /// retried; it is never interpreted as a changed conversation or its end.
+    /// A timeout records why the last frame was refused. That reason is not
+    /// cleared by a later success: the walk may already have reached its target.
     private func stablePage(timeout: Double = 3) throws -> Page {
         let started = clock()
         defer { stableSeconds += clock() - started; checksSinceChatVerified += 1 }
@@ -608,52 +640,197 @@ final class WeChatAccessibility {
         // step also re-matches the rows it already knew through
         // `WeChatViewport`, which no other conversation can satisfy.
         var verifiedHere = false
+        var lastReject: WeChatSnapshotReject?
         repeat {
             try frontmost()
-            var found: WCNode?
-            if let settledList, checksSinceChatVerified < 8 || verifiedHere {
-                let node = WCNode(settledList)
-                if node.readError == .success, node.id == "chat_message_list" { found = node }
-            }
-            if found == nil {
-                let nodes = try scan()
-                guard chatMatches(nodes) else { throw WeChatAutomationError.focusChanged }
-                found = nodes.first { $0.id == "chat_message_list" }
-                settledList = found?.element
-                checksSinceChatVerified = 0
-                verifiedHere = true
-            }
-            if let list = found, list.readError == .success {
-                // WeChat exposes an empty virtual_cell prefix, followed by
-                // materialised rows ending at the viewport's bottom. Walk
-                // that suffix, not every previously loaded placeholder.
-                var materialized: [WCNode] = []
-                for child in list.children.reversed() {
-                    let node = WCNode(child)
-                    if node.id == "virtual_cell", node.rect.isEmpty { break }
-                    materialized.append(node)
-                }
-                var rows = materialized.reversed().filter {
-                    $0.id == "chat_bubble_item_view" && !$0.rect.intersection(list.rect).isNull
-                }
-                // Keep the general reader for a version with virtual cells
-                // after, or interspersed among, its materialised children.
-                if rows.isEmpty {
-                    rows = list.children.map(WCNode.init).filter {
-                        $0.id == "chat_bubble_item_view" && !$0.rect.intersection(list.rect).isNull
-                    }
-                }
-                if !rows.isEmpty, rows.allSatisfy({ $0.readError == .success && !$0.strings.isEmpty }),
-                   zip(rows, rows.dropFirst()).allSatisfy({ $0.rect.minY < $1.rect.minY }) {
-                    let page = Page(list: list, rows: rows)
+            if let sample = try sampleList(verifiedHere: &verifiedHere) {
+                if let reject = sample.reject {
+                    lastReject = reject
+                    previous = nil
+                    settledList = nil
+                } else {
+                    let page = Page(list: sample.list, rows: sample.rows)
                     if page.signature == previous { return page }
                     previous = page.signature
-                } else { previous = nil; settledList = nil }
-            } else { settledList = nil }
+                    lastReject = .pageChanged
+                }
+            } else {
+                lastReject = .listMissing
+                previous = nil
+                settledList = nil
+            }
             // The list settles on its own; this only paces the next look.
             try pause(0.02)
         } while clock() < deadline
+        if let lastReject {
+            if snapshotRejectReason.isEmpty { snapshotRejectReason = lastReject.rawValue }
+            steps.append(["kind": "snapshot-rejected", "reason": lastReject.rawValue, "phase": phase])
+        }
         throw WeChatAutomationError.loading
+    }
+
+    /// One reading of the visible bubbles. Calling it twice is what `stablePage`
+    /// does; a caller that already holds the keyboard row may use one reading
+    /// when the second will not match, and must not treat that as the batch boundary.
+    private func readablePage() throws -> Page? {
+        var verifiedHere = false
+        guard let sample = try sampleList(verifiedHere: &verifiedHere) else { return nil }
+        if sample.reject == nil { return Page(list: sample.list, rows: sample.rows) }
+        // Another bubble's missing text does not move the focused row. Drop
+        // those bubbles. Overlap and a failed read do not leave a geometry
+        // that can be nudged safely.
+        guard sample.reject == .emptyText else { return nil }
+        let usable = sample.rows.filter { $0.readError == .success && !$0.strings.isEmpty }
+        guard !usable.isEmpty, zip(usable, usable.dropFirst()).allSatisfy({ $0.rect.minY < $1.rect.minY }) else { return nil }
+        return Page(list: sample.list, rows: usable)
+    }
+
+    /// A settled read when the list will give one, otherwise a single reading.
+    /// Nil only when the list itself cannot be read. `settled` is false for
+    /// that single reading: it can place the focused row, not the next batch.
+    private func probedPage() throws -> (page: Page, settled: Bool)? {
+        do { return (try stablePage(timeout: 3), true) }
+        catch WeChatAutomationError.loading {
+            guard let page = try readablePage() else { return nil }
+            return (page, false)
+        }
+    }
+
+    private func sampleList(verifiedHere: inout Bool) throws -> ListSample? {
+        var found: WCNode?
+        if let settledList, checksSinceChatVerified < 8 || verifiedHere {
+            let node = WCNode(settledList)
+            if node.readError == .success, node.id == "chat_message_list" { found = node }
+        }
+        if found == nil {
+            let nodes = try scan()
+            guard chatMatches(nodes) else { throw WeChatAutomationError.focusChanged }
+            found = nodes.first { $0.id == "chat_message_list" }
+            settledList = found?.element
+            checksSinceChatVerified = 0
+            verifiedHere = true
+        }
+        guard let list = found, list.readError == .success else { return nil }
+        let rows = materializedBubbles(list)
+        let reject = WeChatPageSample.reject(listFound: true, rows: rows.map {
+            WeChatVisibleSample(readOK: $0.readError == .success, textEmpty: $0.strings.isEmpty, y: $0.rect.minY)
+        })
+        return ListSample(list: list, rows: rows, reject: reject)
+    }
+
+    /// WeChat exposes an empty virtual_cell prefix, followed by materialised
+    /// rows ending at the viewport's bottom. Walk that suffix, not every
+    /// previously loaded placeholder. The general reader stays for a version
+    /// with virtual cells after, or among, its materialised children.
+    private func materializedBubbles(_ list: WCNode) -> [WCNode] {
+        var materialized: [WCNode] = []
+        for child in list.children.reversed() {
+            let node = WCNode(child)
+            if node.id == "virtual_cell", node.rect.isEmpty { break }
+            materialized.append(node)
+        }
+        var rows = materialized.reversed().filter {
+            $0.id == "chat_bubble_item_view" && !$0.rect.intersection(list.rect).isNull
+        }
+        if rows.isEmpty {
+            rows = list.children.map(WCNode.init).filter {
+                $0.id == "chat_bubble_item_view" && !$0.rect.intersection(list.rect).isNull
+            }
+        }
+        return rows
+    }
+
+    private func focusMessage(_ node: WCNode, ordinal: Int) -> WeChatFocusedMessage {
+        WeChatFocusedMessage(identifier: node.id, role: node.role, texts: node.strings, y: node.rect.minY, height: node.rect.height, selected: node.selected, ordinal: ordinal)
+    }
+
+    private func textHash(_ strings: [String]) -> String {
+        SHA256.hash(data: Data(strings.joined(separator: "\u{1e}").utf8)).prefix(8).map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// Record the counted target before asking the page to settle. The hash is
+    /// the only copy of the text that leaves this process.
+    private func noteKeyboardTarget(_ node: WCNode, count: Int, keys: Int) {
+        let ordinal = count - 1
+        keyboardTarget = focusMessage(node, ordinal: ordinal)
+        keyboardTargetElement = node.element
+        keyboardTargetReached = true
+        keyboardMessages += count
+        let hash = textHash(node.strings)
+        focusedMessageLog = ["id": node.id, "role": node.role, "hash": hash, "y": Double(node.rect.minY), "height": Double(node.rect.height), "selected": node.selected, "ordinal": ordinal]
+        steps.append(["kind": "keyboard-target", "messages": count, "keys": keys, "hash": hash, "y": Double(node.rect.minY), "height": Double(node.rect.height), "selected": node.selected, "ordinal": ordinal])
+    }
+
+    /// The focused bubble, read more than once. The first read may sit at a new
+    /// position: the page was given time to settle and Qt may have aligned the
+    /// row. A recycled cell that kept the pointer has different text and is
+    /// refused. A new pointer is the same message only when it is still on the
+    /// spot the walk left. Later reads have to hold still; other rows may change.
+    private func repeatedFocus(_ target: WeChatFocusedMessage, element: AXUIElement, samples: Int) throws -> WCNode? {
+        var accepted = element
+        var baseline: WeChatFocusedMessage?
+        var last: WCNode?
+        for index in 0..<samples {
+            try verifyChat()
+            guard let node = focusedNode() else { return nil }
+            let current = focusMessage(node, ordinal: target.ordinal)
+            if let baseline {
+                let verdict = WeChatFocusHold.judge(current: current, target: baseline, elementMatches: CFEqual(node.element, accepted), expectedShift: 0, slack: 4)
+                guard verdict == .held else { return nil }
+            } else {
+                guard WeChatFocusHold.identifies(current, as: target) else { return nil }
+                let samePointer = CFEqual(node.element, element)
+                if !samePointer, abs(current.y - target.y) > 24 { return nil }
+            }
+            accepted = node.element
+            baseline = current
+            last = node
+            if index + 1 < samples { try pause(0.02) }
+        }
+        return last
+    }
+
+    /// Scroll the viewport toward older messages without sending an arrow key.
+    /// A focus that lands on a different bubble — including another copy of the
+    /// same text — stops the nudge. The caller must not then press Down to
+    /// hunt for the row it lost.
+    private func nudgeOlder(from current: WCNode, ordinal: Int, list: WCNode, forced: Bool) throws -> WCNode? {
+        let points = WeChatFocusClearance.olderNudge(rowY: current.rect.minY, listTop: list.rect.minY) ?? (forced ? WeChatFocusClearance.capNudge : nil)
+        guard let points else { return current }
+        let units = WeChatNudge.units(points: points, gain: gain)
+        let target = focusMessage(current, ordinal: ordinal)
+        try scroll(list.element, delta: units, settle: gesturePause)
+        guard let now = focusedNode() else {
+            recoveryAttempts.append(["attempt": recoveryAttempts.count + 1, "points": points, "units": Int(units), "held": false, "verdict": "missing"])
+            return nil
+        }
+        let shift = Double(now.rect.minY - current.rect.minY)
+        let verdict = WeChatFocusHold.judge(current: focusMessage(now, ordinal: ordinal), target: target, elementMatches: CFEqual(now.element, current.element), expectedShift: points, slack: max(8, points * 0.6))
+        let held = verdict == .held || verdict == .unmoved
+        recoveryAttempts.append(["attempt": recoveryAttempts.count + 1, "points": points, "units": Int(units), "held": held, "verdict": "\(verdict)", "shift": shift])
+        guard held else { return nil }
+        if verdict == .held, units != 0 {
+            let measured = shift / Double(units)
+            if WeChatScrollStep.isPlausible(gain: measured) { gain = measured; gainMeasured = true }
+        }
+        return now
+    }
+
+    /// Pointer equality is not enough: a recycled cell keeps the pointer and
+    /// changes its text. Two bubbles with the same text are accepted only when
+    /// one of them is unambiguously the focused row.
+    private func indexOfFocus(_ node: WCNode, in page: Page) -> Int? {
+        let current = focusMessage(node, ordinal: keyboardTarget?.ordinal ?? 0)
+        let matches = page.rows.indices.filter {
+            WeChatFocusHold.identifies(focusMessage(page.rows[$0], ordinal: current.ordinal), as: current)
+        }
+        if let exact = matches.first(where: { CFEqual(page.rows[$0].element, node.element) }) { return exact }
+        let near = matches.filter { abs(page.rows[$0].rect.minY - node.rect.minY) < 8 }
+        return near.count == 1 ? near[0] : nil
+    }
+
+    private func noteRangeControl(_ node: WCNode?) {
+        rangeControlState = WeChatRangeControlLabel.parse(node?.strings ?? []).rawValue
     }
 
     private func checkedMessage(_ node: WCNode) throws -> String {
@@ -717,6 +894,14 @@ final class WeChatAccessibility {
     private struct Selection {
         let count: Int
         let checkpoint: Checkpoint
+        /// This batch ended on the conversation's first message: there is
+        /// nothing older to select, and a caller walking the whole
+        /// conversation is done.
+        let reachedConversationTop: Bool
+        /// Two identical page snapshots proved the endpoint, so another batch
+        /// may resume from the checkpoint. A focus-only proof still exports
+        /// this batch, then stops.
+        let boundaryConfirmed: Bool
     }
     private struct Checkpoint {
         let viewport: WeChatViewport
@@ -734,11 +919,17 @@ final class WeChatAccessibility {
         let maximumSteps: Int
         var steps = 0
         var visits: [String: Int] = [:]
+        /// A degraded short-conversation endpoint returns to the page the
+        /// stall was measured on, which the visit cap would otherwise read
+        /// as oscillation. Set for that one re-entry only.
+        var forgivesRepeat = false
         mutating func observe(_ page: Page) throws {
             steps += 1
             visits[page.signature, default: 0] += 1
-            guard ProcessInfo.processInfo.systemUptime < deadline, steps <= maximumSteps,
-                  visits[page.signature, default: 0] <= 3 else { throw WeChatAutomationError.selection }
+            let repeatViolation = visits[page.signature, default: 0] > 3
+            if forgivesRepeat && repeatViolation { forgivesRepeat = false }
+            else if repeatViolation { throw WeChatAutomationError.selection }
+            guard ProcessInfo.processInfo.systemUptime < deadline, steps <= maximumSteps else { throw WeChatAutomationError.selection }
         }
     }
 
@@ -806,6 +997,60 @@ final class WeChatAccessibility {
         var count: CFIndex = 0
         guard AXUIElementGetAttributeValueCount(list, "AXChildren" as CFString, &count) == .success else { return 0 }
         return Int(count)
+    }
+
+    /// Whether the page's list holds the conversation's first message.
+    ///
+    /// While WeChat still has history to fetch, the list exposes a prefix of
+    /// unmaterialised `virtual_cell` slots above its rows; a conversation
+    /// fully at its top has a materialised first child and no such prefix.
+    /// The padding between the first row and the list's edge is not read:
+    /// focus alignment puts a row flush against that edge too, so geometry
+    /// cannot tell the two cases apart — only the slots can.
+    private func conversationTopReached(_ children: [AXUIElement]) -> Bool {
+        guard let first = children.first.map(WCNode.init),
+              first.readError == .success, first.id != "virtual_cell", !first.rect.isEmpty else { return false }
+        return children.dropFirst().prefix(8).allSatisfy { WCNode($0).id != "virtual_cell" }
+    }
+
+    private func conversationTopReached(_ page: Page) -> Bool {
+        conversationTopReached(page.list.children)
+    }
+
+    /// A stalled walk has two readings: WeChat fetching older history, or the
+    /// conversation's first message sitting at the top of the list. The first
+    /// is temporary — a fetch that completes lets the next gesture move the
+    /// list again — so the top is only confirmed after further spaced
+    /// attempts move nothing and the list holds no unmaterialised slots
+    /// above its first row. A probe that does move the list reports `moved`
+    /// with the page it reached: the caller keeps going rather than failing
+    /// on a load that was merely slow.
+    private enum StallProbing {
+        case top(Page, settled: Bool)
+        case moved(Page)
+        case stuck
+    }
+
+    private func confirmConversationTop(_ stalled: Page, stalledSettled: Bool) throws -> StallProbing {
+        var page = stalled
+        var settled = stalledSettled
+        let signature = page.signature
+        // Two pauses, then a scroll, before the absent virtual-cell prefix is
+        // allowed to mean the first message. A list that is still fetching
+        // moves, or still cannot be read, and is not the top.
+        for _ in 0..<2 {
+            try pause(1.0)
+            guard let looked = try probedPage() else { return .stuck }
+            page = looked.page
+            settled = settled && looked.settled
+            if page.signature != signature { return .moved(page) }
+            try scroll(page.list.element, delta: 60, settle: WeChatScrollStep.lengthened(gesturePause))
+            guard let looked = try probedPage() else { return .stuck }
+            page = looked.page
+            settled = settled && looked.settled
+            if page.signature != signature { return .moved(page) }
+        }
+        return conversationTopReached(page) ? .top(page, settled: settled) : .stuck
     }
 
     /// Keep requesting the top until history is loaded, then return once. The
@@ -976,7 +1221,66 @@ final class WeChatAccessibility {
     /// bubble; non-message rows (timestamps/system notices) are not counted.
     /// Wait only until that particular key has changed focus, never a fixed
     /// gesture delay. Count message rows without interpreting their contents.
-    private func keyboardRange(from start: Page, limit: Int, endpointFocus: Bool = false) throws -> (Page, WeChatViewport)? {
+    /// The traversal outcome: where the keyboard row ended, the rebound
+    /// viewport, and how many messages it proved — fewer than `limit` when
+    /// the conversation itself ran out above.
+    private struct KeyboardArrival {
+        let page: Page
+        let tracked: WeChatViewport
+        let count: Int
+        let reachedConversationTop: Bool
+        /// False when only the focused message was proved. The range control
+        /// may still run; the next batch may not resume from this viewport.
+        let pageSettled: Bool
+    }
+
+    /// A keyboard walk can end on the timestamp immediately above the first
+    /// message. WeChat may expose no visible bubble at that focus, so the
+    /// general stable-page reader cannot provide a range endpoint. The stalled
+    /// static-text focus and messages already counted establish this short
+    /// batch; one Down returns to its last counted bubble, which is then
+    /// rebound through the ordinary stable-page checks.
+    private func keyboardTopArrivalAfterTextStall(focused: WCNode, lastMessage: WCNode, count: Int) throws -> KeyboardArrival? {
+        guard count > 1, focused.role == "AXStaticText", let list = settledList,
+              let children = wcAttribute(list, "AXChildren") as? [AXUIElement],
+              children.contains(where: { CFEqual($0, focused.element) }),
+              let current = focusedNode(), current.role == "AXStaticText",
+              CFEqual(current.element, focused.element), current.strings == focused.strings else { return nil }
+
+        try navigationKey(125)
+        let deadline = clock() + 0.5
+        var next: WCNode?
+        repeat {
+            try frontmost()
+            if let node = focusedNode(),
+               !CFEqual(node.element, focused.element) || node.strings != focused.strings {
+                next = node
+                break
+            }
+            try pause(0.001)
+        } while clock() < deadline
+        guard let next, next.id == "chat_bubble_item_view", next.role == "AXCheckBox",
+              CFEqual(next.element, lastMessage.element) || (next.rect == lastMessage.rect && next.strings == lastMessage.strings) else { return nil }
+
+        let page: Page
+        let settled: Bool
+        do { page = try stablePage(); settled = true }
+        catch WeChatAutomationError.loading {
+            guard let once = try readablePage() else { return nil }
+            page = once
+            settled = false
+        }
+        guard let index = page.rows.firstIndex(where: {
+            CFEqual($0.element, next.element) || ($0.rect == next.rect && $0.strings == next.strings)
+        }), !page.rows[index].selected else { return nil }
+        steps.append(["kind": "short-conversation", "via": "keyboard-text-stall", "reached": count])
+        keyboardMessages += count
+        return KeyboardArrival(page: page,
+                               tracked: WeChatViewport(rows: page.data, anchorIndex: index, anchorOrdinal: count - 1),
+                               count: count, reachedConversationTop: true, pageSettled: settled)
+    }
+
+    private func keyboardRange(from start: Page, limit: Int, endpointFocus: Bool = false) throws -> KeyboardArrival? {
         guard try focusList(start), var first = focusedNode() else { return nil }
         steps.append(["kind": "keyboard-setup", "focusID": first.id, "role": first.role,
                       "selected": first.selected,
@@ -1017,6 +1321,7 @@ final class WeChatAccessibility {
         guard first.selected, first.id == "chat_bubble_item_view", first.role == "AXCheckBox" else { return nil }
         phase = "keyboard-range"
         var previous = first
+        var lastMessage = first
         var count = 1
         let deadline = clock() + 35
         var keys = 0
@@ -1042,30 +1347,220 @@ final class WeChatAccessibility {
                     let fresh = try stablePage()
                     if fresh.signature == start.signature { return nil }
                 }
-                throw WeChatAutomationError.historyIncomplete
+                // Focus will not move above the conversation's first message.
+                // A fetch under way stalls the same way, so the page has to
+                // prove the top before this reads as a short conversation.
+                // Focus usually rests on the timestamp above that message,
+                // which is not a row; the topmost row below it is the one
+                // the walk counted last.
+                if let arrival = try keyboardTopArrivalAfterTextStall(focused: previous, lastMessage: lastMessage, count: count) {
+                    return arrival
+                }
+                let stalled: Page
+                let stalledSettled: Bool
+                do { stalled = try stablePage(); stalledSettled = true }
+                catch WeChatAutomationError.loading {
+                    // Still loading is not the first message. A single reading
+                    // is only a place to start the probe, which itself has to
+                    // see the list stay put and the virtual cells run out.
+                    guard let once = try readablePage() else { throw WeChatAutomationError.historyUnconfirmed }
+                    stalled = once
+                    stalledSettled = false
+                }
+                switch try confirmConversationTop(stalled, stalledSettled: stalledSettled) {
+                case .top(let page, let settled):
+                    // Focus rests either on the first message or on the
+                    // timestamp above it. The last counted bubble is the
+                    // remainder this batch can still select.
+                    let focus = previous.id == "chat_bubble_item_view" ? previous : lastMessage
+                    let landed = page.rows.firstIndex { CFEqual($0.element, focus.element) || CFEqual($0.element, lastMessage.element) }
+                        ?? page.rows.firstIndex { $0.rect.minY >= lastMessage.rect.minY }
+                    if let index = landed, page.rows[..<index].allSatisfy({ !$0.selected }) {
+                        steps.append(["kind": "short-conversation", "via": "keyboard", "reached": count, "settled": settled])
+                        keyboardMessages += count
+                        return KeyboardArrival(page: page, tracked: WeChatViewport(rows: page.data, anchorIndex: index, anchorOrdinal: count - 1), count: count, reachedConversationTop: true, pageSettled: settled)
+                    }
+                case .moved:
+                    // The load this read as a stall completed. Focus never
+                    // moved off `previous` while the list scrolled, so the
+                    // count stands; the next Up continues the walk from it.
+                    continue
+                case .stuck:
+                    break
+                }
+                throw WeChatAutomationError.historyUnconfirmed
             }
             guard let list = settledList,
                   (wcAttribute(list, "AXChildren") as? [AXUIElement] ?? []).contains(where: { CFEqual($0, next.element) }) else { throw WeChatAutomationError.focusChanged }
             if next.id == "chat_bubble_item_view" {
-                guard next.role == "AXCheckBox", !next.selected else { throw WeChatAutomationError.selection }
+                guard next.role == "AXCheckBox" else { throw WeChatAutomationError.selection }
+                if next.selected {
+                    // The anchor is the only selected row. Reaching it again
+                    // means Up ran out of older messages and wrapped. That is
+                    // the conversation's first message, not a broken selection.
+                    guard CFEqual(next.element, first.element),
+                          let arrival = try keyboardTopArrival(focused: previous, count: count, via: "keyboard-wrap") else {
+                        throw WeChatAutomationError.historyUnconfirmed
+                    }
+                    return arrival
+                }
                 count += 1
-            } else {
-                guard next.role == "AXStaticText" else { throw WeChatAutomationError.selection }
+                lastMessage = next
             }
+            // Timestamps, system notices, cards and images are siblings of the
+            // bubbles. They are not messages. Refusing every role except
+            // static text aborted the walk before the range button ran, so a
+            // short conversation — including a count of zero, which asks for
+            // all of it — stopped in multi-select with nothing exported.
             previous = next
         }
-        let page = try stablePage()
+        noteKeyboardTarget(previous, count: count, keys: keys)
+        do {
+            return try focusedArrival(page: try stablePage(), focus: previous, count: count, keys: keys, settled: true, reachedTop: false)
+        } catch WeChatAutomationError.loading {
+            let ordinal = count - 1
+            guard let held = try repeatedFocus(focusMessage(previous, ordinal: ordinal), element: previous.element, samples: 3),
+                  let once = try readablePage(), indexOfFocus(held, in: once) != nil else {
+                throw WeChatAutomationError.selection
+            }
+            return try focusedArrival(page: once, focus: held, count: count, keys: keys, settled: false, reachedTop: false)
+        }
+    }
+
+    /// The counted row, located either in a settled page or on the keyboard
+    /// alone. `keyboardMessages` was already stored when the count was reached.
+    private func focusedArrival(page: Page, focus: WCNode, count: Int, keys: Int, settled: Bool, reachedTop: Bool) throws -> KeyboardArrival {
         phase = "keyboard-arrived"
-        observe("keyboard-arrived", page)
-        steps.append(["kind": "keyboard", "messages": count, "keys": keys,
-                      "focusIndex": page.rows.firstIndex(where: { CFEqual($0.element, previous.element) }) ?? -1,
-                      "labelMatch": page.rows.contains(where: { $0.strings == previous.strings }),
-                      "focusedY": previous.rect.minY, "focusedHeight": previous.rect.height])
-        guard let index = page.rows.firstIndex(where: { CFEqual($0.element, previous.element) }),
-              page.rows[index].strings == previous.strings else { throw WeChatAutomationError.selection }
-        let tracked = WeChatViewport(rows: page.data, anchorIndex: index, anchorOrdinal: limit - 1)
-        keyboardMessages += count
-        return (page, tracked)
+        observe(settled ? "keyboard-arrived" : "keyboard-focus", page)
+        guard let index = page.rows.firstIndex(where: { CFEqual($0.element, focus.element) && $0.strings == focus.strings }) ?? indexOfFocus(focus, in: page) else {
+            throw WeChatAutomationError.selection
+        }
+        guard page.rows[index].strings == focus.strings else { throw WeChatAutomationError.selection }
+        steps.append(["kind": "keyboard", "messages": count, "keys": keys, "settled": settled,
+                      "focusIndex": index, "labelMatch": true,
+                      "focusedY": focus.rect.minY, "focusedHeight": focus.rect.height])
+        let tracked = WeChatViewport(rows: page.data, anchorIndex: index, anchorOrdinal: count - 1)
+        return KeyboardArrival(page: page, tracked: tracked, count: count, reachedConversationTop: reachedTop, pageSettled: settled)
+    }
+
+    /// The keyboard walk ran out of older messages and landed back on the
+    /// anchor. The endpoint is the oldest loaded bubble, and only once that
+    /// bubble is on screen and the list has no unloaded cells above it.
+    private func keyboardTopArrival(focused: WCNode, count: Int, via: String) throws -> KeyboardArrival? {
+        func make(_ page: Page, settled: Bool) -> KeyboardArrival? {
+            guard conversationTopReached(page) else { return nil }
+            let oldest = page.list.children.lazy.map(WCNode.init).first {
+                $0.readError == .success && $0.id == "chat_bubble_item_view" && !$0.rect.isEmpty
+            }
+            guard let oldest,
+                  let index = page.rows.firstIndex(where: { CFEqual($0.element, oldest.element) }),
+                  page.rows[..<index].allSatisfy({ !$0.selected }) else { return nil }
+            steps.append(["kind": "short-conversation", "via": via, "reached": count, "focus": focused.role, "settled": settled])
+            keyboardMessages += count
+            return KeyboardArrival(page: page, tracked: WeChatViewport(rows: page.data, anchorIndex: index, anchorOrdinal: count - 1), count: count, reachedConversationTop: true, pageSettled: settled)
+        }
+        func onePage() throws -> (Page, Bool)? {
+            do { return (try stablePage(), true) }
+            catch WeChatAutomationError.loading {
+                guard let once = try readablePage() else { return nil }
+                return (once, false)
+            }
+        }
+        if let (page, settled) = try onePage(), let arrival = make(page, settled: settled) { return arrival }
+        guard let (current, _) = try onePage(), try focusList(current) else { return nil }
+        try navigationKey(115)
+        let deadline = clock() + 1.5
+        repeat {
+            try frontmost()
+            if let node = focusedNode(), node.id != "virtual_cell", !node.rect.isEmpty,
+               abs(node.rect.minY - current.list.rect.minY) < 8 { break }
+            try pause(0.02)
+        } while clock() < deadline
+        guard let (page, settled) = try onePage() else { return nil }
+        return make(page, settled: settled)
+    }
+
+    /// After a nudge, prefer a settled page and keep a single reading when the
+    /// list will not sit still. A missing list is a failed proof, not a cue to
+    /// press the range control anyway.
+    private func pageAfterScroll() throws -> Page {
+        do { return try stablePage(timeout: 0.6) }
+        catch WeChatAutomationError.loading {
+            guard let once = try readablePage() else { throw WeChatAutomationError.selection }
+            return once
+        }
+    }
+
+    private func endpointIsSelected(ordinal: Int) -> Bool {
+        guard let node = focusedNode(), node.selected, let saved = keyboardTarget else { return false }
+        return WeChatFocusHold.identifies(focusMessage(node, ordinal: ordinal), as: saved)
+    }
+
+    /// The range control has been pressed. A settled page rebinds the next
+    /// batch. A page that will not settle can still confirm that the focused
+    /// message is now selected; that batch is exported and the walk stops.
+    private func commitRange(page: Page, tracked: WeChatViewport, limit: Int, usedKeyboard: Bool, conversationEnded: Bool, pageSettled: Bool) throws -> Selection {
+        var tracked = tracked
+        var settled = pageSettled
+        let confirmed: Page
+        do {
+            confirmed = try stablePage()
+            settled = true
+        } catch WeChatAutomationError.loading {
+            settled = false
+            guard let once = try readablePage() else { throw WeChatAutomationError.selection }
+            confirmed = once
+        }
+        observe("after-range", confirmed)
+        let pinned = pinKeyboardRow(&tracked, page: confirmed, ordinal: usedKeyboard ? limit - 1 : nil)
+        if !pinned {
+            do { try tracked.resume(confirmed.data) }
+            catch {
+                guard endpointIsSelected(ordinal: limit - 1) else { throw WeChatAutomationError.selection }
+                return Selection(count: limit, checkpoint: try checkpoint(tracked, page: page, keyboardOrdinal: usedKeyboard ? limit - 1 : nil), reachedConversationTop: conversationEnded, boundaryConfirmed: false)
+            }
+        }
+        guard let endpoint = tracked.index(of: limit - 1), confirmed.rows[endpoint].selected else { throw WeChatAutomationError.selection }
+        if !settled { guard endpointIsSelected(ordinal: limit - 1) else { throw WeChatAutomationError.selection } }
+        return Selection(count: limit, checkpoint: try checkpoint(tracked, page: confirmed, keyboardOrdinal: usedKeyboard ? limit - 1 : nil), reachedConversationTop: conversationEnded, boundaryConfirmed: settled)
+    }
+
+    /// The keyboard count is known and the page is not. Press 「选择到这里」 only
+    /// when that label is showing and the endpoint has clearance. A cap, or a
+    /// bubble flush with the top, gets a few viewport nudges. Nothing here
+    /// sends an arrow key.
+    private func finishFromFocus(page initial: Page, tracked initialTracked: WeChatViewport, limit: Int, conversationEnded: Bool) throws -> Selection {
+        var page = initial
+        var tracked = initialTracked
+        guard var current = focusedNode() else { throw WeChatAutomationError.selection }
+        let ordinal = limit - 1
+        for _ in 0..<WeChatFocusClearance.maximumAttempts {
+            guard let index = tracked.index(of: ordinal) ?? indexOfFocus(current, in: page), page.rows.indices.contains(index) else {
+                throw WeChatAutomationError.selection
+            }
+            let button = try rangeControl()
+            noteRangeControl(button)
+            let label = WeChatRangeControlLabel.parse(button?.strings ?? [])
+            steps.append(["kind": "range-control", "state": label.rawValue, "rowY": Double(page.rows[index].rect.minY), "listTop": Double(page.list.rect.minY)])
+            if label == .selectHere,
+               tracked.canSelectRange(endingAt: ordinal, listTop: page.list.rect.minY, listHeight: page.list.rect.height, keyboardVerified: true),
+               let button {
+                observe("before-range", page)
+                try press(button)
+                rangeClicks += 1
+                return try commitRange(page: page, tracked: tracked, limit: limit, usedKeyboard: true, conversationEnded: conversationEnded, pageSettled: false)
+            }
+            let flush = WeChatFocusClearance.olderNudge(rowY: page.rows[index].rect.minY, listTop: page.list.rect.minY) != nil
+            guard label == .capped || flush else { break }
+            guard let nudged = try nudgeOlder(from: current, ordinal: ordinal, list: page.list, forced: label == .capped) else {
+                throw WeChatAutomationError.selection
+            }
+            current = nudged
+            page = try pageAfterScroll()
+            guard let idx = indexOfFocus(current, in: page) else { throw WeChatAutomationError.selection }
+            tracked = WeChatViewport(rows: page.data, anchorIndex: idx, anchorOrdinal: ordinal)
+        }
+        throw WeChatAutomationError.selection
     }
 
     private func selectBatch(limit: Int, start: SelectionStart, latestPage: Page? = nil) throws -> Selection {
@@ -1157,10 +1652,24 @@ final class WeChatAccessibility {
         var page = selectedPage
         guard let index = page.rows.firstIndex(where: \.selected) else { throw WeChatAutomationError.selection }
         var tracked = WeChatViewport(rows: page.data, anchorIndex: index)
-        if limit == 1 { return Selection(count: 1, checkpoint: try checkpoint(tracked, page: page)) }
+        if limit == 1 { return Selection(count: 1, checkpoint: try checkpoint(tracked, page: page), reachedConversationTop: false, boundaryConfirmed: true) }
         var usedKeyboard = false
-        if let (arrived, positioned) = try keyboardRange(from: page, limit: limit, endpointFocus: resumedFromKeyboard) {
-            page = arrived; tracked = positioned; usedKeyboard = true
+        var conversationEnded = false
+        // A conversation with fewer messages than `limit` reports its own
+        // count here; the selection below still ends at its first message.
+        var limit = limit
+        if let arrival = try keyboardRange(from: page, limit: limit, endpointFocus: resumedFromKeyboard) {
+            page = arrival.page; tracked = arrival.tracked; usedKeyboard = true
+            limit = arrival.count
+            conversationEnded = arrival.reachedConversationTop
+            // The conversation ran out on its only message. It is already the
+            // selected anchor; there is no older row for the range button.
+            if arrival.count == 1, arrival.reachedConversationTop {
+                return Selection(count: 1, checkpoint: try checkpoint(tracked, page: page), reachedConversationTop: true, boundaryConfirmed: true)
+            }
+            if !arrival.pageSettled {
+                return try finishFromFocus(page: page, tracked: tracked, limit: limit, conversationEnded: conversationEnded)
+            }
         } else {
             // Setting AXFocused may itself scroll in another Qt version.
             // Rebind before using the wheel fallback's initial ordinal.
@@ -1199,7 +1708,7 @@ final class WeChatAccessibility {
                     observe("after-shift-range", page)
                     do { try tracked.resume(page.data) } catch { throw WeChatAutomationError.selection }
                     guard page.rows.indices.filter({ page.rows[$0].selected }) == Array(target...newestIndex) else { throw WeChatAutomationError.selection }
-                    return Selection(count: limit, checkpoint: try checkpoint(tracked, page: page))
+                    return Selection(count: limit, checkpoint: try checkpoint(tracked, page: page), reachedConversationTop: conversationEnded, boundaryConfirmed: true)
                 }
                 // Qt's range button excludes a row flush against its top
                 // edge. Native Up aligns exactly there; give it the same
@@ -1214,23 +1723,49 @@ final class WeChatAccessibility {
                     // above that is whole is WeChat's start instead, and the
                     // nudge does fix that.
                     if capped(button) {
-                        if target == 0 || page.rows[target - 1].rect.minY < page.list.rect.minY {
-                            try pause(0.15)
-                            if capped(try rangeControl()) { observe("range-cap", page); throw WeChatAutomationError.selection }
+                        noteRangeControl(button)
+                        // Keep the keyboard row. A few points toward older
+                        // messages moves that bubble down off the edge; a Down
+                        // key would make it the previous message.
+                        if usedKeyboard, recoveryAttempts.count < WeChatFocusClearance.maximumAttempts {
+                            guard let focused = focusedNode(),
+                                  let nudged = try nudgeOlder(from: focused, ordinal: limit - 1, list: page.list, forced: true) else {
+                                throw WeChatAutomationError.selection
+                            }
+                            page = try pageAfterScroll()
+                            if let idx = indexOfFocus(nudged, in: page) {
+                                tracked = WeChatViewport(rows: page.data, anchorIndex: idx, anchorOrdinal: limit - 1)
+                            }
                             continue
                         }
-                    } else if button.strings.contains("选择到这里") {
+                        if target == 0 || page.rows[target - 1].rect.minY < page.list.rect.minY {
+                            try pause(0.15)
+                            let again = try rangeControl()
+                            noteRangeControl(again)
+                            if capped(again) { observe("range-cap", page); throw WeChatAutomationError.selection }
+                            continue
+                        }
+                    } else if WeChatRangeControlLabel.parse(button.strings) == .selectHere {
+                        noteRangeControl(button)
                         observe("before-range", page)
                         try press(button)
                         rangeClicks += 1
-                        page = try stablePage()
-                        observe("after-range", page)
-                        if !pinKeyboardRow(&tracked, page: page, ordinal: usedKeyboard ? limit - 1 : nil) {
-                            do { try tracked.resume(page.data) } catch { throw WeChatAutomationError.selection }
-                        }
-                        guard let endpoint = tracked.index(of: limit - 1), page.rows[endpoint].selected else { throw WeChatAutomationError.selection }
-                        return Selection(count: limit, checkpoint: try checkpoint(tracked, page: page, keyboardOrdinal: usedKeyboard ? limit - 1 : nil))
+                        return try commitRange(page: page, tracked: tracked, limit: limit, usedKeyboard: usedKeyboard, conversationEnded: conversationEnded, pageSettled: true)
                     }
+                }
+                if usedKeyboard, WeChatFocusClearance.olderNudge(rowY: row.rect.minY, listTop: page.list.rect.minY) != nil {
+                    // The endpoint is against the top edge, so the range control
+                    // will not take it. Move the viewport, not the keyboard row.
+                    guard recoveryAttempts.count < WeChatFocusClearance.maximumAttempts,
+                          let focused = focusedNode(),
+                          let nudged = try nudgeOlder(from: focused, ordinal: limit - 1, list: page.list, forced: false) else {
+                        throw WeChatAutomationError.selection
+                    }
+                    page = try pageAfterScroll()
+                    if let idx = indexOfFocus(nudged, in: page) {
+                        tracked = WeChatViewport(rows: page.data, anchorIndex: idx, anchorOrdinal: limit - 1)
+                    }
+                    continue
                 }
                 let distance = page.list.rect.minY + 8 - row.rect.minY
                 let amount = Int((distance / max(1, gain)).rounded())
@@ -1240,7 +1775,48 @@ final class WeChatAccessibility {
             try scroll(page.list.element, delta: delta, settle: gesturePause)
             page = try stablePage()
             unchanged = page.signature == before.signature ? unchanged + 1 : 0
-            guard unchanged < 3 else { throw WeChatAutomationError.historyIncomplete }
+            guard unchanged < 3 else {
+                // The list is not moving. That is either WeChat fetching more
+                // history above, or the conversation's first message sitting
+                // at the top of it. The first is temporary — a completed
+                // fetch lets the next gesture move again — so confirm the top
+                // before reading this as a short conversation. Confirmed, the
+                // oldest row the tracker holds is the first message: degrade
+                // the batch to what exists and let the range selection below
+                // end on that row, exactly as it would have on the requested
+                // one. `unchanged` keeps its count: the degraded endpoint is
+                // on screen now, and the loop's own cap still bounds a
+                // selection that keeps stalling.
+                switch try confirmConversationTop(page, stalledSettled: true) {
+                case .top(let atTop, _):
+                    // `rows[0]` holds ordinal `firstOrdinal`, the conversation's
+                    // first message now that the top is proven.
+                    let existing = tracked.firstOrdinal + 1
+                    if existing < limit {
+                        steps.append(["kind": "short-conversation", "via": "wheel", "reached": existing])
+                        conversationEnded = true
+                        limit = existing
+                        page = atTop
+                        budget.forgivesRepeat = true
+                        do { try tracked.resume(atTop.data) } catch { throw WeChatAutomationError.selection }
+                        if existing == 1 {
+                            return Selection(count: 1, checkpoint: try checkpoint(tracked, page: page), reachedConversationTop: true, boundaryConfirmed: true)
+                        }
+                        continue
+                    }
+                case .moved(let resumed):
+                    // A slow load finished during the probe. Take the page it
+                    // reached and keep walking; the tracker rebinds the same
+                    // way it does after an ordinary scroll.
+                    page = resumed
+                    do { try tracked.advance(resumed.data, older: true) } catch { throw WeChatAutomationError.selection }
+                    unchanged = 0
+                    continue
+                case .stuck:
+                    break
+                }
+                throw WeChatAutomationError.historyUnconfirmed
+            }
             // The keyboard row is this batch's endpoint. A burst of photos from
             // one sender reads the same whether the nudge moved the list or not,
             // and taking it as unmoved counted the batch past a hundred.
@@ -1518,9 +2094,12 @@ final class WeChatAccessibility {
     }
 
     private func diagnostics(started: Double, outcome: String, count: Int) {
-        let report: [String: Any] = ["schemaVersion": 6, "strategy": "native-keyboard-range", "at": ISO8601DateFormatter().string(from: Date()),
+        let report: [String: Any] = ["schemaVersion": 7, "strategy": "native-keyboard-range", "at": ISO8601DateFormatter().string(from: Date()),
             "outcome": outcome, "phase": phase, "seconds": clock() - started, "messageCount": count,
-            "navigationKeys": navigationKeys, "keyboardMessages": keyboardMessages, "scrolls": scrollCount, "scrollSeconds": scrollSeconds, "scanSeconds": scanSeconds, "scanCalls": scanCalls, "stableSeconds": stableSeconds, "exportSeconds": exportSeconds, "prefetchSeconds": prefetchSeconds, "prefetchRows": prefetchRows, "prefetchLoaded": prefetchLoaded, "scrollsByPhase": scrollsByPhase, "steps": steps, "clicks": clickCount, "rangeClicks": rangeClicks, "shiftRangeClicks": shiftRangeClicks, "exports": exportCount, "resumedBatches": resumedBatches, "keyboardPins": keyboardPins,
+            "navigationKeys": navigationKeys, "keyboardMessages": keyboardMessages, "keyboardTargetReached": keyboardTargetReached,
+            "focusedMessage": focusedMessageLog, "snapshotRejectReason": snapshotRejectReason,
+            "recoveryAttempts": recoveryAttempts, "rangeControlState": rangeControlState, "boundaryStopped": boundaryStopped,
+            "scrolls": scrollCount, "scrollSeconds": scrollSeconds, "scanSeconds": scanSeconds, "scanCalls": scanCalls, "stableSeconds": stableSeconds, "exportSeconds": exportSeconds, "prefetchSeconds": prefetchSeconds, "prefetchRows": prefetchRows, "prefetchLoaded": prefetchLoaded, "scrollsByPhase": scrollsByPhase, "steps": steps, "clicks": clickCount, "rangeClicks": rangeClicks, "shiftRangeClicks": shiftRangeClicks, "exports": exportCount, "resumedBatches": resumedBatches, "keyboardPins": keyboardPins,
             "snapshots": snapshots, "receiptReadRetries": receiptReadRetries,
             "locator": locator, "visualMilliseconds": visualMilliseconds, "lastNodeCount": lastNodeCount,
             "scanTruncated": scanTruncated, "controlFailure": controlFailure ?? [:],
@@ -1532,7 +2111,7 @@ final class WeChatAccessibility {
         }
     }
 
-    func capture(range: WeChatForwardRange, ready: URL, shelfExtension: URL, identifySelf: Bool = false) throws -> WeChatCapture {
+    func capture(range: WeChatForwardRange, ready: URL, shelfExtension: URL, identifySelf: Bool = false, checkpoint: WeChatArchiveCheckpoint? = nil) throws -> WeChatCapture {
         guard range.unit == .messages else { throw WeChatAutomationError.timeRangeUnavailable }
         guard range.isValid else { throw WeChatAutomationError.selection }
         let started = clock()
@@ -1543,35 +2122,85 @@ final class WeChatAccessibility {
         let selfSender = identifySelf ? try currentAccountNickname() : nil
         // Anything past one native batch reaches history WeChat has not
         // materialised yet. Load it in one pass now rather than a gesture at a
-        // time inside every batch's budget.
+        // time inside every batch's budget. The whole conversation has no
+        // count to load towards; its batches meet the fetches as usual.
         let latestPage: Page?
-        if range.value > WeChatPrefetch.threshold { latestPage = try prefetchHistory(target: range.value) }
+        if !range.isUnlimited, range.value > WeChatPrefetch.threshold { latestPage = try prefetchHistory(target: range.value) }
         else { latestPage = nil }
         var directories: [URL] = []
         var batchMessageCounts: [Int] = []
         var start = SelectionStart.latest
-        while selectedCount < range.value {
+        var conversationEnded = false
+        var reachedHistoryStart = false
+        var chronological: [WeChatTranscriptRecord] = []
+        var increment: WeChatIncrementCut?
+        let maximumIncrementalBatches = 40
+        while !conversationEnded {
             try verifyChat()
-            let limit = min(100, range.value - selectedCount)
+            let limit = checkpoint == nil
+                ? (range.isUnlimited ? 100 : min(100, range.value - selectedCount))
+                : 100
+            // The whole-conversation walk meets cold history every batch, the
+            // condition the upfront pass exists for. Warm the next batch's
+            // rows the same way, one interval at a time.
+            let warmPage: Page?
+            if checkpoint == nil, range.isUnlimited, selectedCount > 0 { warmPage = try prefetchHistory(target: selectedCount + WeChatPrefetch.threshold) }
+            else { warmPage = selectedCount == 0 ? latestPage : nil }
             progress(L10n.format("正在选择消息 · 已导出约 %d 条", count))
-            let selected = try selectBatch(limit: limit, start: start, latestPage: selectedCount == 0 ? latestPage : nil)
+            let selected = try selectBatch(limit: limit, start: start, latestPage: warmPage)
             progress(L10n.format("已选中 %d 条消息，正在导出…", selected.count))
             let directory = try nativeExport(ready: ready, shelfExtension: shelfExtension)
             start = .resume(selected.checkpoint, ordinal: selected.count)
             phase = "archive"
             let exportedCount = try WeChatArchive.messageCount(directory: directory, cancellation: cancellation)
+            let counted = ForwardArchiveName.reportedCount(parsed: exportedCount, fallback: selected.count) ?? selected.count
             steps.append(["kind": "archive", "selected": selected.count,
-                          "messages": exportedCount ?? selected.count, "estimated": exportedCount == nil])
+                          "messages": counted, "estimated": exportedCount == nil || exportedCount == 0,
+                          "boundaryConfirmed": selected.boundaryConfirmed,
+                          "parsedMismatch": exportedCount.map { $0 != selected.count } ?? false])
             directories.append(directory)
-            batchMessageCounts.append(exportedCount ?? selected.count)
-            // Selection controls navigation and when to stop. Parsed counts
-            // only describe the exported payload, so small differences never
-            // trigger extra selection, retries or a discarded native ZIP.
+            batchMessageCounts.append(counted)
+            // Selection controls navigation and when to stop. A parsed count
+            // that differs from the selection describes the payload; it does
+            // not discard the ZIP or start another pass over the same rows.
+            // It also does not invent a resume point the viewport never proved.
+            // A parsed zero is not the file's count: 0 in the form means the
+            // whole conversation, and the name has to say how many were exported.
             selectedCount += selected.count
-            count += exportedCount ?? selected.count
+            count += counted
+            if let checkpoint {
+                guard let records = try WeChatArchive.records(directory: directory, cancellation: cancellation) else {
+                    throw WeChatAutomationError.incrementUnconfirmed
+                }
+                // This batch is older than the ones already exported. The
+                // archived tail is matched against the whole run, not one ZIP.
+                chronological = records + chronological
+                switch WeChatIncrement.assess(checkpoint: checkpoint, records: chronological) {
+                case .keepCollecting:
+                    if selected.reachedConversationTop || directories.count >= maximumIncrementalBatches {
+                        throw WeChatAutomationError.incrementUnconfirmed
+                    }
+                case .ready(let cut):
+                    increment = cut
+                    steps.append(["kind": "increment", "drop": cut.dropPrefix, "retained": cut.retained, "overlap": cut.overlap])
+                    conversationEnded = true
+                case .uncertain:
+                    throw WeChatAutomationError.incrementUnconfirmed
+                }
+            }
+            let requestSatisfied = checkpoint == nil && !range.isUnlimited && selectedCount >= range.value
+            if selected.reachedConversationTop { reachedHistoryStart = true }
+            if checkpoint == nil, WeChatBatchBoundary.warnStoppedEarly(boundaryConfirmed: selected.boundaryConfirmed, reachedHistoryStart: selected.reachedConversationTop, requestSatisfied: requestSatisfied) {
+                boundaryStopped = true
+            }
+            if checkpoint == nil {
+                conversationEnded = !WeChatBatchBoundary.resumeNextBatch(boundaryConfirmed: selected.boundaryConfirmed, reachedHistoryStart: selected.reachedConversationTop) || requestSatisfied
+            } else if selected.reachedConversationTop, increment == nil {
+                throw WeChatAutomationError.incrementUnconfirmed
+            }
         }
-        phase = "complete"; outcome = "exported"
+        phase = "complete"; outcome = boundaryStopped ? "stopped" : "exported"
         return WeChatCapture(directories: directories, batchMessageCounts: batchMessageCounts, messageCount: count, readSeconds: 0, captureSeconds: clock() - started,
-                             selfSender: selfSender)
+                             selfSender: selfSender, boundaryStopped: boundaryStopped, reachedHistoryStart: reachedHistoryStart, increment: increment)
     }
 }

@@ -32,7 +32,7 @@
 		</dict>
 	</array>
 	<key>CFBundleVersion</key>
-	<string>27</string>
+	<string>28</string>
 	<key>NSDownloadsFolderUsageDescription</key>
 	<string>读取和暂存微信分享的文件，以整理并保存聊天记录。</string>
 	<key>LSMinimumSystemVersion</key>

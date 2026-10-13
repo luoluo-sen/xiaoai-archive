@@ -25,7 +25,12 @@ public struct WeChatForwardRange: Codable, Hashable, Sendable {
         self.value = value
     }
 
-    public var isValid: Bool { value > 0 && value <= unit.maximum }
+    /// A message count of zero walks the conversation to its first message.
+    public var isUnlimited: Bool { unit == .messages && value == 0 }
+
+    /// Time presets keep their positive bounds. A message count starts at
+    /// zero, where zero means every message rather than none.
+    public var isValid: Bool { value >= (unit == .messages ? 0 : 1) && value <= unit.maximum }
 
     /// What the amount field may hold, filtered as it is typed.
     ///
@@ -37,16 +42,20 @@ public struct WeChatForwardRange: Codable, Hashable, Sendable {
     ///
     /// The range itself is not enforced here. A number outside it is still a
     /// number the field should show while the form says what is wrong with it.
-    public static func digits(_ text: String, limit: Int = .max) -> String {
+    /// `preserveZero` keeps a lone zero instead of stripping leading zeros —
+    /// the message count's zero is a mode, not a typo.
+    public static func digits(_ text: String, limit: Int = .max, preserveZero: Bool = false) -> String {
         var result = ""
         var digitCount = 0
+        var zeroOnly = false
         for character in text {
             guard digitCount < limit else { break }
             guard let value = character.wholeNumberValue, (0...9).contains(value) else { continue }
             digitCount += 1
-            // Skip leading zeros in one pass, including for a long pasted count.
             if value != 0 || !result.isEmpty { result += String(value) }
+            else if preserveZero { zeroOnly = true }
         }
+        if preserveZero { return result.isEmpty && zeroOnly ? "0" : result }
         return result.isEmpty && digitCount > 0 ? "0" : result
     }
 
@@ -55,8 +64,10 @@ public struct WeChatForwardRange: Codable, Hashable, Sendable {
 
     /// Estimate at 100 messages per 5 seconds, rounded up to a whole second.
     /// Divide before rounding so even Int.max never overflows or loses precision.
+    /// No estimate for the whole conversation: its length is what the run is
+    /// still finding out.
     public var estimatedSeconds: Int? {
-        guard isAvailableForAutomation else { return nil }
+        guard isAvailableForAutomation, !isUnlimited else { return nil }
         return value / 20 + (value % 20 == 0 ? 0 : 1)
     }
 
@@ -81,7 +92,7 @@ public struct WeChatForwardRange: Codable, Hashable, Sendable {
         switch unit {
         case .hours: L10n.format("最近 %d 小时", value)
         case .days: L10n.format("最近 %d 天", value)
-        case .messages: L10n.format("最近 %@ 条消息", String(value))
+        case .messages: isUnlimited ? L10n.text("全部消息") : L10n.format("最近 %@ 条消息", String(value))
         }
     }
 
@@ -121,10 +132,13 @@ public struct WeChatForwardPreset: Codable, Hashable, Identifiable, Sendable {
     /// WeChat's ZIP — so both start on.
     public var saveImages: Bool
     public var saveVideos: Bool
+    /// Collect only messages newer than this chat's archive checkpoint.
+    /// A full export is what creates and replaces that checkpoint.
+    public var incremental: Bool
     public var lastUsed: Date?
     public var id: String { chat }
 
-    public init(chat: String = "", range: WeChatForwardRange = .init(), targetBundleIdentifier: String = "", targetName: String = "", destinationFolder: URL? = nil, pastePath: Bool = false, mergeArchives: Bool = false, htmlPreview: Bool = false, markdown: Bool = false, saveImages: Bool = true, saveVideos: Bool = true, lastUsed: Date? = nil) {
+    public init(chat: String = "", range: WeChatForwardRange = .init(), targetBundleIdentifier: String = "", targetName: String = "", destinationFolder: URL? = nil, pastePath: Bool = false, mergeArchives: Bool = false, htmlPreview: Bool = false, markdown: Bool = false, saveImages: Bool = true, saveVideos: Bool = true, incremental: Bool = false, lastUsed: Date? = nil) {
         self.chat = Self.normalizedChat(chat)
         self.range = range
         self.targetBundleIdentifier = destinationFolder == nil ? targetBundleIdentifier : ""
@@ -136,11 +150,12 @@ public struct WeChatForwardPreset: Codable, Hashable, Identifiable, Sendable {
         self.markdown = markdown
         self.saveImages = saveImages
         self.saveVideos = saveVideos
+        self.incremental = incremental
         self.lastUsed = lastUsed
     }
 
     private enum CodingKeys: String, CodingKey {
-        case chat, range, targetBundleIdentifier, targetName, destinationFolder, pastePath, mergeArchives, htmlPreview, markdown, saveImages, saveVideos, lastUsed
+        case chat, range, targetBundleIdentifier, targetName, destinationFolder, pastePath, mergeArchives, htmlPreview, markdown, saveImages, saveVideos, incremental, lastUsed
     }
 
     public init(from decoder: Decoder) throws {
@@ -157,6 +172,7 @@ public struct WeChatForwardPreset: Codable, Hashable, Identifiable, Sendable {
             markdown: try values.decodeIfPresent(Bool.self, forKey: .markdown) ?? false,
             saveImages: try values.decodeIfPresent(Bool.self, forKey: .saveImages) ?? true,
             saveVideos: try values.decodeIfPresent(Bool.self, forKey: .saveVideos) ?? true,
+            incremental: try values.decodeIfPresent(Bool.self, forKey: .incremental) ?? false,
             lastUsed: try values.decodeIfPresent(Date.self, forKey: .lastUsed)
         )
     }
@@ -165,8 +181,9 @@ public struct WeChatForwardPreset: Codable, Hashable, Identifiable, Sendable {
     public var savesMarkdown: Bool { markdown && destinationFolder != nil }
 
     /// A recommendation only: the user can still send the individual archives.
+    /// The whole conversation is unknown length, but it is at least a batch.
     public var recommendsMergingArchives: Bool {
-        destinationFolder == nil && !mergeArchives && range.isAvailableForAutomation && range.value > 500
+        destinationFolder == nil && !mergeArchives && range.isAvailableForAutomation && (range.isUnlimited || range.value > 500)
     }
 
     public static func normalizedChat(_ value: String) -> String {

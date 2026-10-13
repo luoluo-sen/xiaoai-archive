@@ -23,6 +23,14 @@ A new Mac does not inherit another Mac's system permissions, and the app does no
 
 Formal installers target macOS 14 or later and include Apple Silicon and Intel architectures through the release script. Window list recognition currently supports the regular and folded lists in Chinese-language WeChat; other WeChat interface languages are not implemented yet.
 
+## Single-chat and batch export
+
+Choose Single Chat in Quick WeChat Forwarding and specify the chat name and latest message count. For Batch Chats, read the current window list and select the chats to process. An empty individual count uses the uniform count; entering a count on a row overrides it. Apply to Selected clears overrides and resets those rows' execution status. Use as Single Chat copies that row's name and effective count into the single-chat form.
+
+Batch jobs share media and destination settings and run serially, waiting for each chat's files to be received and saved or pasted before continuing. Archives are separate per chat. Counts above 100 use WeChat's existing 100-message export batches, optionally merged into one ZIP per chat. Failure pauses the queue; Continue Unfinished Chats skips completed rows. Cancellation preserves saved output. Changing a count or reselecting a completed row requests a new run for that chat. Rereading the window list rebuilds selection and progress; neither the list nor batch progress persists across app restarts.
+
+The list contains only currently loaded conversations. Selecting a row confirms it is a group chat; duplicate names are not resolved automatically. Batch processing still uses the existing Accessibility and synthetic mouse/keyboard implementation, not an official WeChat batch export API. Development validation does not operate WeChat; real single-chat and batch exports require manual user verification.
+
 ## Building from source on another development Mac
 
 If the configured certificate is not in the new Mac's Keychain, import the same certificate and private key. For an independent local build on a new development machine, deliberately clear `SigningIdentity` in `Project.plist`, then perform the one-time local setup below. End users installing formal releases do not do this. Do not clear or replace signing settings for regular updates on an authorized machine.

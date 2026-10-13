@@ -64,17 +64,28 @@ final class WeChatQuickForward: ObservableObject {
         guard !isBusy, !isReadingChat, !isReadingChatList, !otherAutomationIsBusy(),
               draft.destinationFolder.map(\.isFileURL) ?? applications.contains(where: { $0.id == draft.targetBundleIdentifier }) else { return false }
         if !batchMode {
-            return !WeChatForwardPreset.normalizedChat(draft.chat).isEmpty && draft.range.isAvailableForAutomation
+            return !WeChatForwardPreset.normalizedChat(draft.chat).isEmpty && draft.range.isAvailableForAutomation && !batchChatIsSpecial(draft.chat)
         }
-        let pending = batchRows.filter { $0.isSelected && $0.state != .completed }
-        return !pending.isEmpty && pending.allSatisfy { batchCount(id: $0.id) != nil && uniqueBatchChat($0.chat) }
+        return !runnableBatchRows.isEmpty
     }
+
+    /// Selected rows that can be opened by name. A repeated name is omitted
+    /// here instead of disabling every other selected chat.
+    var runnableBatchRows: [WeChatBatchRow] {
+        batchRows.filter { row in
+            row.isSelected && row.state != .completed && batchCount(id: row.id) != nil && uniqueBatchChat(row.chat) && !batchChatIsSpecial(row.chat)
+        }
+    }
+
+    func batchChatIsAmbiguous(_ name: String) -> Bool { !uniqueBatchChat(name) }
+
+    func batchChatIsSpecial(_ name: String) -> Bool { WeChatSpecialSession.kind(of: name) != nil }
 
     var selectedBatchCount: Int { batchRows.filter(\.isSelected).count }
     var canResumeBatch: Bool {
-        batchRows.contains { $0.isSelected && ($0.state == .failed || $0.state == .cancelled) } ||
-        (batchRows.contains { $0.isSelected && $0.state == .completed } &&
-         batchRows.contains { $0.isSelected && $0.state == .waiting })
+        let considered = batchRows.filter { $0.isSelected && uniqueBatchChat($0.chat) && !batchChatIsSpecial($0.chat) }
+        return considered.contains { $0.state == .failed || $0.state == .cancelled } ||
+            (considered.contains { $0.state == .completed } && considered.contains { $0.state == .waiting })
     }
     var startTitle: String {
         if !batchMode { return draft.destinationFolder == nil ? L10n.text("开始转发") : L10n.text("开始保存") }
@@ -108,6 +119,7 @@ final class WeChatQuickForward: ObservableObject {
 
     func setBatchSelected(id: String, selected: Bool) {
         guard !isBusy, let index = batchRows.firstIndex(where: { $0.id == id }) else { return }
+        if selected, batchChatIsSpecial(batchRows[index].chat) { return }
         guard batchRows[index].isSelected != selected else { return }
         batchRows[index].isSelected = selected
         if selected { resetBatchRow(at: index) }
@@ -126,6 +138,7 @@ final class WeChatQuickForward: ObservableObject {
     func selectAllBatchRows(_ selected: Bool) {
         guard !isBusy else { return }
         for index in batchRows.indices {
+            if selected, batchChatIsSpecial(batchRows[index].chat) { continue }
             batchRows[index].isSelected = selected
             if selected { resetBatchRow(at: index) }
         }
@@ -142,7 +155,7 @@ final class WeChatQuickForward: ObservableObject {
     }
 
     func useBatchRow(id: String) {
-        guard !isBusy, let row = batchRows.first(where: { $0.id == id }), let count = batchCount(id: id) else { return }
+        guard !isBusy, let row = batchRows.first(where: { $0.id == id }), !batchChatIsSpecial(row.chat), let count = batchCount(id: id) else { return }
         batchMode = false
         draft.chat = row.chat
         draft.range = .init(unit: .messages, value: count)
@@ -307,10 +320,11 @@ final class WeChatQuickForward: ObservableObject {
                 error = L10n.text("请勾选名称唯一的群聊，填写有效条数，并选择输出位置。")
                 return
             }
-            let jobs = batchRows.filter { $0.isSelected && $0.state != .completed }.map { row in
+            let jobs = runnableBatchRows.compactMap { row -> (id: String?, preset: WeChatForwardPreset)? in
+                guard let count = batchCount(id: row.id) else { return nil }
                 var preset = draft
                 preset.chat = WeChatForwardPreset.normalizedChat(row.chat)
-                preset.range = .init(unit: .messages, value: batchCount(id: row.id)!)
+                preset.range = .init(unit: .messages, value: count)
                 preset.incremental = false
                 return (id: Optional(row.id), preset: preset)
             }
@@ -380,6 +394,8 @@ final class WeChatQuickForward: ObservableObject {
                 try token.check()
                 guard Date().timeIntervalSince(requestedAt) <= BatchIntent.freshnessWindow else { throw WeChatAutomationError.focusChanged }
                 self.model.deferIntake(); self.shelf.suspendPresentation(); deferredIntake = true
+                var failed = 0
+                var lastFailure = ""
                 for (index, job) in jobs.enumerated() {
                     try token.check()
                     activeID = job.id
@@ -387,14 +403,30 @@ final class WeChatQuickForward: ObservableObject {
                         self.updateBatchRow(id: id, state: .running, detail: nil)
                         self.batchPrefix = L10n.format("第 %d/%d 个群 · %@", index + 1, jobs.count, job.preset.chat)
                     }
-                    let result = try await self.run(job.preset, targetPID: targetPID, requestedAt: Date(), token: token)
-                    if let id = job.id { self.updateBatchRow(id: id, state: .completed, detail: result) }
-                    completed += 1
-                    activeID = nil
+                    do {
+                        let result = try await self.run(job.preset, targetPID: targetPID, requestedAt: Date(), token: token)
+                        if let id = job.id { self.updateBatchRow(id: id, state: .completed, detail: result) }
+                        completed += 1
+                        activeID = nil
+                    } catch is CancellationError {
+                        throw CancellationError()
+                    } catch {
+                        guard job.id != nil else { throw error }
+                        failed += 1
+                        lastFailure = error.localizedDescription
+                        if let id = job.id { self.updateBatchRow(id: id, state: .failed, detail: lastFailure) }
+                        activeID = nil
+                    }
                 }
                 if first.id != nil {
                     self.batchPrefix = nil
-                    self.status = L10n.format("批量完成 · 本次已处理 %d 个群聊", completed)
+                    if failed == 0 {
+                        self.status = L10n.format("批量完成 · 本次已处理 %d 个群聊", completed)
+                    } else if completed == 0 {
+                        self.error = lastFailure
+                    } else {
+                        self.status = L10n.format("批量结束 · 完成 %d 个，失败 %d 个", completed, failed)
+                    }
                 }
                 if let folder = first.preset.destinationFolder { NSWorkspace.shared.open(folder) }
             } catch is CancellationError {
@@ -449,12 +481,13 @@ final class WeChatQuickForward: ObservableObject {
             }
             let extensionURL = Bundle.main.bundleURL.appendingPathComponent("Contents/PlugIns/DukouShare.appex")
             let checkpoint = preset.incremental ? preferences.archiveCheckpoints.checkpoint(for: preset.chat) : nil
+            let sessionOrder = batchRows.map(\.chat)
             let capture: WeChatCapture = try await withCheckedThrowingContinuation { continuation in
                 Self.worker.async {
                     continuation.resume(with: Result {
                         if let folder = preset.destinationFolder { try QuickForwardFolderDelivery.validateFolder(folder) }
                         try token.check()
-                        let engine = try WeChatAccessibility(chat: preset.chat, cancellation: token) { [weak self] message in
+                        let engine = try WeChatAccessibility(chat: preset.chat, sessionOrder: sessionOrder, cancellation: token) { [weak self] message in
                             DispatchQueue.main.async { self?.status = message }
                         }
                         return try engine.capture(range: preset.range, ready: inbox.ready, shelfExtension: extensionURL,

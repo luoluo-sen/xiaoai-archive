@@ -380,14 +380,22 @@
 /* Current WeChat window list */
 "当前窗口列表" = "Current window list";
 "读取当前微信窗口中已加载的会话名称。" = "Read the loaded conversation names in the current WeChat window.";
+"滚动当前会话列表到顶和到底，读取窗口以外的会话。" = "Scroll the conversation list to both ends and include chats outside the window.";
 "读取窗口列表" = "Read window list";
 "正在读取窗口列表…" = "Reading window list…";
+"正在滚动并读取会话列表…" = "Scrolling and reading the conversation list…";
+"正在滚动会话列表寻找群聊…" = "Scrolling the conversation list to find the chat…";
 "%@ · %d 个已加载会话" = "%@ · %d loaded conversations";
+"%@ · %d 个会话" = "%@ · %d conversations";
 "已确认 %d 个群聊，另有 %d 个会话待确认。" = "%d confirmed groups and %d conversations with unverified type.";
 "群聊（已确认）" = "Confirmed group";
 "类型待确认" = "Unverified type";
 "仅当前打开会话的群聊类型可确认，其他会话不按名称猜测类型。" = "Only the open conversation can be confirmed as a group. Other types are not inferred from names.";
 "其他会话请在微信中手动展开或滚动后重新读取。" = "To include other conversations, expand or scroll the list in WeChat, then read again.";
+"折叠的聊天需要先在微信中打开，读取时不会自动点进去。" = "Open Folded Chats in WeChat first. This read does not open it.";
+"读取时微信不在前台，请重新读取。" = "WeChat left the foreground during the read. Read the list again.";
+"会话列表滚动后对不齐，请重新读取。" = "The conversation list could not be joined after scrolling. Read it again.";
+"会话列表太长，这次没有滚到尽头。请再读一次。" = "The conversation list is too long to reach the end this time. Read it again.";
 "普通会话" = "Conversations";
 "折叠的聊天" = "Folded chats";
 "读取窗口列表需要辅助功能权限。" = "Reading the window list requires Accessibility permission.";
@@ -450,6 +458,8 @@
 "%@ 的消息条数" = "Message count for %@";
 "设为单群" = "Use as Single Chat";
 "勾选即确认该会话为群聊；同名会话无法自动区分，请先在微信中确认名称唯一。" = "Selecting a conversation confirms it is a group chat. Same-name conversations cannot be distinguished automatically; confirm unique names in WeChat first.";
+"同名会话，不会保存" = "Duplicate name, not saved";
+"特殊入口，已跳过" = "Special entry, skipped";
 "先读取窗口列表，再勾选需要批量处理的群聊。" = "Read the window list first, then select the chats to process.";
 "每群合并为一个 ZIP" = "Merge each chat into one ZIP";
 "等待执行" = "Waiting";
@@ -461,4 +471,5 @@
 "请勾选名称唯一的群聊，填写有效条数，并选择输出位置。" = "Select chats with unique names, enter valid counts, and choose an output destination.";
 "第 %d/%d 个群 · %@" = "Chat %d/%d · %@";
 "批量完成 · 本次已处理 %d 个群聊" = "Batch complete · %d chats processed in this run";
+"批量结束 · 完成 %d 个，失败 %d 个" = "Batch finished · %d completed, %d failed";
 "已收到的文件保留在暂存架。" = "Files already received remain on the shelf.";

@@ -204,7 +204,7 @@ struct WeChatPane: View {
     private var chatListSection: some View {
         SettingsSection(title: L10n.text("当前窗口列表"), systemImage: "list.bullet", spacing: Space.m) {
             HStack(spacing: Space.m) {
-                Text(L10n.text("读取当前微信窗口中已加载的会话名称。"))
+                Text(L10n.text("滚动当前会话列表到顶和到底，读取窗口以外的会话。"))
                     .font(Typo.paneCaption).foregroundStyle(Theme.inkSecondary)
                     .fixedSize(horizontal: false, vertical: true)
                 Spacer(minLength: 0)
@@ -217,7 +217,7 @@ struct WeChatPane: View {
             if forward.isReadingChatList {
                 HStack(spacing: Space.s) {
                     ProgressView().controlSize(.small)
-                    Text(L10n.text("正在读取窗口列表…")).font(Typo.paneCaption)
+                    Text(L10n.text("正在滚动并读取会话列表…")).font(Typo.paneCaption)
                 }
             }
             if let error = forward.chatListError {
@@ -225,7 +225,7 @@ struct WeChatPane: View {
             }
             if let list = forward.chatList {
                 VStack(alignment: .leading, spacing: Space.s) {
-                    Text(L10n.format("%@ · %d 个已加载会话", listTitle(list.scope), list.entries.count))
+                    Text(L10n.format("%@ · %d 个会话", listTitle(list.scope), list.entries.count))
                         .font(Typo.rowTitle)
                         .accessibilityIdentifier("wechat.chatListCount")
                     Text(L10n.format("已确认 %d 个群聊，另有 %d 个会话待确认。", list.confirmedGroupCount, list.unverifiedCount))
@@ -258,7 +258,7 @@ struct WeChatPane: View {
                     Text(L10n.text("仅当前打开会话的群聊类型可确认，其他会话不按名称猜测类型。"))
                         .font(Typo.paneCaption).foregroundStyle(Theme.inkSecondary)
                         .fixedSize(horizontal: false, vertical: true)
-                    Text(L10n.text("其他会话请在微信中手动展开或滚动后重新读取。"))
+                    Text(L10n.text("折叠的聊天需要先在微信中打开，读取时不会自动点进去。"))
                         .font(Typo.paneCaption).foregroundStyle(Theme.inkSecondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
@@ -378,6 +378,7 @@ private struct WeChatBatchItemRow: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 .toggleStyle(.checkbox)
+                .disabled(forward.batchChatIsSpecial(row.chat))
                 .accessibilityIdentifier("wechat.batchRow." + row.id + ".selected")
                 TextField(forward.batchAmountText.isEmpty ? L10n.text("统一条数") : forward.batchAmountText, text: $count)
                     .textFieldStyle(SettingsTextFieldStyle(numeric: true, invalid: !countIsValid))
@@ -399,11 +400,16 @@ private struct WeChatBatchItemRow: View {
                 Button(L10n.text("设为单群")) { forward.useBatchRow(id: row.id) }
                     .buttonStyle(SettingsActionButtonStyle())
                     .fixedSize()
+                    .disabled(forward.batchChatIsAmbiguous(row.chat) || forward.batchChatIsSpecial(row.chat))
                     .accessibilityIdentifier("wechat.batchRow." + row.id + ".single")
             }
             HStack(alignment: .top, spacing: Space.m) {
-                Text(row.isConfirmedGroup ? L10n.text("群聊（已确认）") : L10n.text("类型待确认"))
-                    .foregroundStyle(row.isConfirmedGroup ? Theme.positive : Theme.inkSecondary)
+                Text(forward.batchChatIsSpecial(row.chat) ? L10n.text("特殊入口，已跳过") : (row.isConfirmedGroup ? L10n.text("群聊（已确认）") : L10n.text("类型待确认")))
+                    .foregroundStyle(forward.batchChatIsSpecial(row.chat) ? Theme.warning : (row.isConfirmedGroup ? Theme.positive : Theme.inkSecondary))
+                if row.isSelected, forward.batchChatIsAmbiguous(row.chat) {
+                    Text(L10n.text("同名会话，不会保存"))
+                        .foregroundStyle(Theme.danger)
+                }
                 Text(row.state.title).foregroundStyle(stateColor)
                     .accessibilityIdentifier("wechat.batchRow." + row.id + ".state")
                 if let detail = row.detail {

@@ -113,6 +113,9 @@ final class WeChatAccessibility {
     private let app: NSRunningApplication
     private let root: AXUIElement
     private let chat: String
+    /// Top-to-bottom names from the last session-list read. Empty when this
+    /// run has no trail; opening a chat then searches both directions.
+    private let sessionOrder: [String]
     private let cancellation: WeChatCancellation
     private let progress: (String) -> Void
     private var ownsSelection = false
@@ -178,12 +181,16 @@ final class WeChatAccessibility {
     private var recoveryAttempts: [[String: Any]] = []
     private var rangeControlState = ""
     private var boundaryStopped = false
+    /// Accidental clicks steal the foreground or the message-list focus.
+    /// A few of those are put back; a run that keeps losing the chat still stops.
+    private var focusRecoveries = 0
 
-    init(chat: String, cancellation: WeChatCancellation, progress: @escaping (String) -> Void) throws {
+    init(chat: String, sessionOrder: [String] = [], cancellation: WeChatCancellation, progress: @escaping (String) -> Void) throws {
         guard AXIsProcessTrusted() else { throw AutoPaste.Failure.notTrusted }
         guard let app = NSRunningApplication.runningApplications(withBundleIdentifier: Self.bundleIdentifier).first else { throw WeChatAutomationError.notRunning }
         self.app = app
         self.chat = WeChatForwardPreset.normalizedChat(chat)
+        self.sessionOrder = sessionOrder.map(WeChatForwardPreset.normalizedChat)
         self.cancellation = cancellation
         self.progress = progress
         root = AXUIElementCreateApplication(app.processIdentifier)
@@ -350,13 +357,56 @@ final class WeChatAccessibility {
     private func chatMatches(_ nodes: [WCNode]) -> Bool {
         nodes.contains { $0.id == "current_chat_name_label" && $0.strings.contains(where: matches) }
     }
+    private var weChatIsFront: Bool {
+        !app.isTerminated && NSWorkspace.shared.frontmostApplication?.processIdentifier == app.processIdentifier
+    }
     private func frontmost() throws {
         try check()
-        guard !app.isTerminated, NSWorkspace.shared.frontmostApplication?.processIdentifier == app.processIdentifier else { throw WeChatAutomationError.focusChanged }
+        guard !app.isTerminated else { throw WeChatAutomationError.notRunning }
+        if weChatIsFront { return }
+        try recoverForeground()
     }
     private func verifyChat() throws {
         try frontmost()
-        guard chatMatches(try scan()) else { throw WeChatAutomationError.focusChanged }
+        if chatMatches(try scan()) { return }
+        // One reading can land between window animations. A second miss is a
+        // click on another session, which this puts back.
+        try pause(0.15)
+        try frontmost()
+        if chatMatches(try scan()) { return }
+        try recoverOpenChat()
+    }
+    /// Bring WeChat forward again after a bump moved the cursor onto another app.
+    private func recoverForeground() throws {
+        guard focusRecoveries < 8 else { throw WeChatAutomationError.focusChanged }
+        focusRecoveries += 1
+        steps.append(["kind": "focus-recover", "reason": "foreground", "attempt": focusRecoveries])
+        try activate()
+        let deadline = clock() + 1.5
+        while clock() < deadline {
+            try check()
+            if weChatIsFront { return }
+            try pause(0.05)
+        }
+        throw WeChatAutomationError.focusChanged
+    }
+    /// The open conversation changed. Return to the one this run is exporting.
+    private func recoverOpenChat() throws {
+        guard focusRecoveries < 8 else { throw WeChatAutomationError.focusChanged }
+        focusRecoveries += 1
+        steps.append(["kind": "focus-recover", "reason": "chat", "attempt": focusRecoveries])
+        let nodes = try scan()
+        if nodes.contains(where: { $0.id == "cancel_btn" }) { throw WeChatAutomationError.focusChanged }
+        let row = try revealSessionRow(in: nodes)
+        try press(row)
+        settledList = nil
+        let deadline = clock() + 2
+        while clock() < deadline {
+            try check()
+            if chatMatches(try scan()) { return }
+            try pause(0.05)
+        }
+        throw WeChatAutomationError.focusChanged
     }
     private func click(_ point: CGPoint, right: Bool = false, modifiers: CGEventFlags = []) throws {
         try frontmost()
@@ -512,6 +562,44 @@ final class WeChatAccessibility {
         lastGestureEnded = clock()
     }
 
+    /// Where keyboard focus sits relative to the message list.
+    ///
+    /// Join notices and message text are often an inner element, not the list
+    /// child itself. Treating that inner element as a different chat aborts a
+    /// batch that is still inside this conversation.
+    private enum ListFocus {
+        case row(WCNode)
+        case unsettled
+        case outside
+    }
+
+    private func listFocus(_ focus: WCNode, list: AXUIElement) -> ListFocus {
+        if focus.id == "chat_input_field" { return .outside }
+        if CFEqual(focus.element, list) || focus.id == "chat_message_list" || focus.id == "virtual_cell" {
+            return .unsettled
+        }
+        if let children = wcAttribute(list, "AXChildren") as? [AXUIElement],
+           children.contains(where: { CFEqual($0, focus.element) }) {
+            return focus.rect.isEmpty ? .unsettled : .row(focus)
+        }
+        var current = focus.element
+        for _ in 0..<12 {
+            guard let parent = wcAttribute(current, "AXParent"), CFGetTypeID(parent) == AXUIElementGetTypeID() else { return .outside }
+            let parentElement = parent as! AXUIElement
+            let parentID = wcAttribute(parentElement, "AXIdentifier") as? String ?? ""
+            if parentID == "chat_input_field" { return .outside }
+            if CFEqual(parentElement, list) || parentID == "chat_message_list" {
+                if parentID == "chat_message_list" { settledList = parentElement }
+                let node = WCNode(current)
+                guard node.readError == .success else { return .unsettled }
+                if node.id == "virtual_cell" || node.rect.isEmpty { return .unsettled }
+                return .row(node)
+            }
+            current = parentElement
+        }
+        return .outside
+    }
+
     /// Qt's list has native Home/End and row-by-row keyboard navigation.
     /// These events go to this process, after verifying the list owns focus;
     /// they must never reach a draft in the composer.
@@ -532,10 +620,42 @@ final class WeChatAccessibility {
         return node.readError == .success ? node : nil
     }
 
+    /// A bump can leave the caret in the composer. The chat is unchanged, so
+    /// the walk continues once the message list has focus again.
+    private func ensureListFocus() throws {
+        guard let list = settledList else { throw WeChatAutomationError.focusChanged }
+        if let focused = focusedNode(), case .outside = listFocus(focused, list: list) {
+            try refocusMessageList(list)
+        } else if focusedNode() == nil {
+            try refocusMessageList(list)
+        }
+    }
+
+    private func refocusMessageList(_ list: AXUIElement) throws {
+        guard focusRecoveries < 8 else { throw WeChatAutomationError.focusChanged }
+        focusRecoveries += 1
+        steps.append(["kind": "focus-recover", "reason": "list", "attempt": focusRecoveries])
+        try verifyChat()
+        _ = AXUIElementSetAttributeValue(list, "AXFocused" as CFString, kCFBooleanTrue)
+        let deadline = clock() + 0.4
+        while clock() < deadline {
+            try check()
+            if let focused = focusedNode() {
+                if case .outside = listFocus(focused, list: list) {
+                    try pause(0.02)
+                    continue
+                }
+                return
+            }
+            try pause(0.02)
+        }
+        historyBoundaryLog = ["stage": "focus", "reason": "outsideList"]
+        throw WeChatAutomationError.focusChanged
+    }
+
     private func navigationKey(_ code: CGKeyCode) throws {
         try frontmost()
-        guard let list = settledList, let focused = focusedNode(),
-              CFEqual(focused.element, list) || (wcAttribute(list, "AXChildren") as? [AXUIElement] ?? []).contains(where: { CFEqual($0, focused.element) }) else { throw WeChatAutomationError.focusChanged }
+        try ensureListFocus()
         let source = CGEventSource(stateID: .privateState)
         guard let down = CGEvent(keyboardEventSource: source, virtualKey: code, keyDown: true),
               let up = CGEvent(keyboardEventSource: source, virtualKey: code, keyDown: false) else { throw AutoPaste.Failure.eventCreationFailed }
@@ -586,13 +706,7 @@ final class WeChatAccessibility {
         let nodes = try scan()
         guard !nodes.contains(where: { $0.id == "chat_log_message_list" || $0.id == "cancel_btn" }), control("合并转发", in: nodes) == nil else { throw WeChatAutomationError.busyChat }
         if chatMatches(nodes) { return }
-        let candidates = nodes.filter { node in
-            guard node.id.hasPrefix("session_item_"), !node.rect.isEmpty else { return false }
-            return matches(String(node.id.dropFirst("session_item_".count))) || node.strings.contains {
-                matches($0.components(separatedBy: "\n").first ?? "") || matches($0.components(separatedBy: ",").first ?? "")
-            }
-        }
-        guard candidates.count == 1, let node = candidates.first else { throw WeChatAutomationError.wrongChat }
+        let node = try revealSessionRow(in: nodes)
         try press(node)
         let opened = clock() + 2
         repeat {
@@ -600,6 +714,76 @@ final class WeChatAccessibility {
             try pause()
         } while clock() < opened
         throw WeChatAutomationError.wrongChat
+    }
+
+    /// The session list only exposes the rows on screen. Scroll it, using the
+    /// saved top-to-bottom order when this run has one, until the named row
+    /// is visible. Both ends stopping without that row is a real miss.
+    private func revealSessionRow(in initial: [WCNode]) throws -> WCNode {
+        let found = sessionMatches(in: initial)
+        if found.count == 1 { return found[0] }
+        if found.count > 1 { throw WeChatAutomationError.wrongChat }
+        guard let list = initial.first(where: { $0.id == "session_list" && !$0.rect.isEmpty }) else {
+            throw WeChatAutomationError.wrongChat
+        }
+        progress(L10n.text("正在滚动会话列表寻找群聊…"))
+        let step = Int32(min(220, max(130, list.rect.height * 0.3)).rounded())
+        var delta = sessionScrollDelta(visible: sessionNames(in: initial), step: step)
+        var previous = sessionNames(in: initial)
+        var idle = 0
+        var termini = 0
+        var currentList = list.element
+        for _ in 0..<80 {
+            try check()
+            try scroll(currentList, delta: delta, settle: 0.02)
+            try pause(0.08)
+            let nodes = try scan()
+            let matches = sessionMatches(in: nodes)
+            if matches.count == 1 { return matches[0] }
+            if matches.count > 1 { throw WeChatAutomationError.wrongChat }
+            if let refreshed = nodes.first(where: { $0.id == "session_list" && !$0.rect.isEmpty }) {
+                currentList = refreshed.element
+            }
+            let page = sessionNames(in: nodes)
+            if page == previous {
+                idle += 1
+                if idle >= 2 {
+                    termini += 1
+                    if termini >= 2 { break }
+                    delta = -delta
+                    idle = 0
+                }
+            } else {
+                idle = 0
+                previous = page
+            }
+        }
+        throw WeChatAutomationError.wrongChat
+    }
+
+    private func sessionMatches(in nodes: [WCNode]) -> [WCNode] {
+        sessionRows(in: nodes).filter { node in
+            matches(String(node.id.dropFirst("session_item_".count))) || node.strings.contains {
+                matches($0.components(separatedBy: "\n").first ?? "") || matches($0.components(separatedBy: ",").first ?? "")
+            }
+        }
+    }
+
+    private func sessionRows(in nodes: [WCNode]) -> [WCNode] {
+        nodes.filter { $0.id.hasPrefix("session_item_") && !$0.rect.isEmpty }
+    }
+
+    private func sessionNames(in nodes: [WCNode]) -> [String] {
+        sessionRows(in: nodes).map { String($0.id.dropFirst("session_item_".count)) }
+    }
+
+    /// Positive scrolls toward the top. Without a saved order, start that way:
+    /// a list left at the bottom is the case that hides the earlier groups.
+    private func sessionScrollDelta(visible: [String], step: Int32) -> Int32 {
+        guard let target = sessionOrder.firstIndex(of: chat) else { return step }
+        let indexes = visible.compactMap { sessionOrder.firstIndex(of: WeChatForwardPreset.normalizedChat($0)) }
+        guard let anchor = indexes.min(by: { abs($0 - target) < abs($1 - target) }), anchor != target else { return step }
+        return anchor > target ? step : -step
     }
 
     private struct Page {
@@ -1265,16 +1449,26 @@ final class WeChatAccessibility {
     /// delayed history fetch finishes during a top probe.
     private func movedKeyboardRow(from previous: WCNode, timeout: Double) throws -> WCNode? {
         let deadline = clock() + timeout
+        var outsideSince: Double?
         repeat {
             try frontmost()
-            if let next = focusedNode(), next.id != "virtual_cell", !next.rect.isEmpty,
-               !sameKeyboardRow(next, previous) {
-                guard let list = settledList,
-                      let children = wcAttribute(list, "AXChildren") as? [AXUIElement],
-                      children.contains(where: { CFEqual($0, next.element) }) else {
-                    throw WeChatAutomationError.focusChanged
+            if let next = focusedNode(), let list = settledList {
+                switch listFocus(next, list: list) {
+                case .outside:
+                    // A click in the composer or the session list is not a
+                    // different chat. Put focus back on the message list.
+                    let now = clock()
+                    if outsideSince == nil { outsideSince = now }
+                    if now - (outsideSince ?? now) > 0.4 {
+                        try refocusMessageList(list)
+                        outsideSince = nil
+                    }
+                case .unsettled:
+                    outsideSince = nil
+                case .row(let row):
+                    outsideSince = nil
+                    if row.id != "virtual_cell", !row.rect.isEmpty, !sameKeyboardRow(row, previous) { return row }
                 }
-                return next
             }
             try pause(0.005)
         } while clock() < deadline
@@ -1293,16 +1487,36 @@ final class WeChatAccessibility {
         for attempt in 0..<6 {
             try verifyChat()
             var verified = false
-            guard let sample = try sampleList(verifiedHere: &verified), let focus = focusedNode(),
-                  let index = sample.list.children.firstIndex(where: { CFEqual($0, focus.element) }),
+            guard let sample = try sampleList(verifiedHere: &verified), let focus = focusedNode() else {
+                throw WeChatAutomationError.historyUnconfirmed
+            }
+            let row: WCNode
+            switch listFocus(focus, list: sample.list.element) {
+            case .outside:
+                historyBoundaryLog = ["stage": "probe", "reason": "outsideList", "focusRole": focus.role, "focusID": focus.id]
+                if let list = settledList {
+                    try refocusMessageList(list)
+                    try pause(0.2)
+                    continue
+                }
+                throw WeChatAutomationError.focusChanged
+            case .unsettled:
+                _ = probe.observe([], at: clock())
+                historyBoundaryLog = ["stage": "probe", "reason": "focusUnmaterialized", "attempt": attempt + 1]
+                try pause(0.5)
+                continue
+            case .row(let resolved):
+                row = resolved
+            }
+            guard let index = sample.list.children.firstIndex(where: { CFEqual($0, row.element) }),
                   index < 4096 else { throw WeChatAutomationError.historyUnconfirmed }
-            if focus.id == "virtual_cell" || focus.rect.isEmpty {
+            if row.id == "virtual_cell" || row.rect.isEmpty {
                 _ = probe.observe([], at: clock())
                 historyBoundaryLog = ["stage": "probe", "reason": "focusUnmaterialized", "attempt": attempt + 1]
                 try pause(0.5)
                 continue
             }
-            if !sameKeyboardRow(focus, previous) { return .moved(focus) }
+            if !sameKeyboardRow(row, previous) { return .moved(row) }
             let prefixNodes = sample.list.children.prefix(index + 1).map(WCNode.init)
             let prefix = prefixNodes.map(historyRow)
             // Up can focus an oversized first row while its top is still far
@@ -1340,7 +1554,12 @@ final class WeChatAccessibility {
     private func restoreHistoryEndpoint(focused: WCNode, lastMessage: WCNode,
                                         passedNotices: [WeChatHistoryRow], count: Int, keys: Int) throws -> KeyboardArrival {
         let endpoint = historyRow(lastMessage)
-        guard count > 0, let focus = focusedNode(), sameKeyboardRow(focus, focused),
+        let focus = focusedNode().flatMap { node -> WCNode? in
+            guard let list = settledList else { return nil }
+            if case .row(let row) = listFocus(node, list: list) { return row }
+            return nil
+        }
+        guard count > 0, let focus, sameKeyboardRow(focus, focused),
               let plan = WeChatHistoryRewind(endpoint: endpoint, passedNotices: passedNotices),
               (passedNotices.last ?? endpoint) == historyRow(focus) else {
             throw WeChatAutomationError.historyUnconfirmed
@@ -1463,7 +1682,7 @@ final class WeChatAccessibility {
             guard clock() < deadline, keys < 600 else { throw WeChatAutomationError.selection }
             try navigationKey(126)
             keys += 1
-            let next: WCNode
+            var next: WCNode
             if let moved = try movedKeyboardRow(from: previous, timeout: min(2, max(0, deadline - clock()))) {
                 next = moved
             } else {
@@ -1489,8 +1708,13 @@ final class WeChatAccessibility {
                     throw WeChatAutomationError.historyUnconfirmed
                 }
             }
-            guard let list = settledList,
-                  (wcAttribute(list, "AXChildren") as? [AXUIElement] ?? []).contains(where: { CFEqual($0, next.element) }) else { throw WeChatAutomationError.focusChanged }
+            guard let list = settledList else { throw WeChatAutomationError.focusChanged }
+            switch listFocus(next, list: list) {
+            case .row(let row): next = row
+            case .unsettled, .outside:
+                historyBoundaryLog = ["stage": "walk", "reason": "outsideList", "focusRole": next.role, "focusID": next.id]
+                throw WeChatAutomationError.focusChanged
+            }
             if next.id == "chat_bubble_item_view" {
                 guard next.role == "AXCheckBox" else { throw WeChatAutomationError.selection }
                 if next.selected {
@@ -2088,7 +2312,22 @@ final class WeChatAccessibility {
         let installed = Bundle(url: shelfExtension)
         guard installed?.bundleIdentifier == "dev.dukou.Dukou.Share", installed?.object(forInfoDictionaryKey: "DKShareAction") as? String == "shelf" else { throw WeChatAutomationError.missingShare }
         try press(try waitControl("合并转发"))
-        _ = try waitControl("取消")
+        // Qt's toolbar button can answer AXPress with success and leave the
+        // multi-select bar where it is. 取消 belongs to the forward sheet, so
+        // a bar that is still showing 合并转发 means the press did not happen.
+        do {
+            _ = try waitControl("取消", timeout: 1.5)
+        } catch let error as WeChatAutomationError {
+            guard case .control = error else { throw error }
+            let nodes = try scan()
+            guard let button = control("合并转发", in: nodes) else { throw error }
+            let label = nodes.first {
+                $0.role == "AXStaticText" && !$0.rect.isEmpty && $0.strings.contains("合并转发")
+            }
+            let rect = label?.rect ?? button.rect
+            try click(CGPoint(x: rect.midX, y: rect.midY))
+            _ = try waitControl("取消")
+        }
         let sheetNodes = try scan()
         // Worth asking twice before falling back to geometry: whatever the row
         // is dressed as, being able to press it directly beats aiming at it.

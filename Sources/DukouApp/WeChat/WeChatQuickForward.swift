@@ -404,6 +404,7 @@ final class WeChatQuickForward: ObservableObject {
                         self.updateBatchRow(id: id, state: .running, detail: nil)
                         self.batchPrefix = L10n.format("第 %d/%d 个群 · %@", index + 1, jobs.count, job.preset.chat)
                     }
+                    self.status = L10n.text("正在打开微信群聊…")
                     do {
                         let result = try await self.run(job.preset, targetPID: targetPID, requestedAt: Date(), token: token)
                         if let id = job.id { self.updateBatchRow(id: id, state: .completed, detail: result) }
@@ -582,7 +583,7 @@ final class WeChatQuickForward: ObservableObject {
                 if added.count == cut.retained, !added.isEmpty {
                     preferences.archiveCheckpoints.advance(preset.chat, by: added)
                 }
-            } else if capture.increment == nil, let archivedRecords {
+            } else if capture.increment == nil, !capture.stoppedEarly, let archivedRecords {
                 preferences.archiveCheckpoints.replace(preset.chat, with: archivedRecords)
             }
             // Delivery has committed. A late cancellation must not strand
@@ -607,7 +608,8 @@ final class WeChatQuickForward: ObservableObject {
             let requested = preset.range.isUnlimited || preset.incremental ? nil : preset.range.value
             let historyNote = WeChatBatchBoundary.finishedShort(requested: requested, actual: shownCount, historyStartProved: capture.reachedHistoryStart)
                 ? L10n.text(" · 聊天记录已到开头") : nil
-            let boundaryNote = capture.boundaryStopped ? L10n.text("已保存已导出的记录。下一批的起点无法确认，已停止。") : nil
+            let boundaryNote = capture.stopReason?.savedMessage
+                ?? (capture.boundaryStopped ? WeChatExportStopReason.nextBatchAnchor.savedMessage : nil)
             let warning: String?
             if preset.destinationFolder != nil {
                 // The folder's name, not its path: the bar has one line, and
@@ -625,7 +627,7 @@ final class WeChatQuickForward: ObservableObject {
                 warning = notes.isEmpty ? nil : notes.joined(separator: "\n")
             }
             status = summary
-            if let warning { error = warning }
+            error = warning
             return summary + (warning.map { "\n" + $0 } ?? "")
     }
 

@@ -9,6 +9,7 @@ enum WeChatAutomationError: Error, LocalizedError {
     case notRunning, interfaceHidden, wrongChat, busyChat, focusChanged, historyIncomplete, historyUnconfirmed, noMessages
     case selection, loading, screenRecording, unsupportedLayout, missingShare, ambiguousReceipt, receiptTimeout, invalidArchive, timeRangeUnavailable
     case incrementNeedsBaseline, incrementUnconfirmed
+    case historyLoadingTimeout, scrollStalled
     case control(String)
 
     var errorDescription: String? {
@@ -20,6 +21,8 @@ enum WeChatAutomationError: Error, LocalizedError {
         case .focusChanged: L10n.text("前台应用或群聊发生了变化，已停止微信操作。")
         case .historyIncomplete: L10n.text("未能读到范围起点。请缩小范围，或先在微信中加载更早的聊天记录。")
         case .historyUnconfirmed: L10n.text("历史边界无法确认。")
+        case .historyLoadingTimeout: L10n.text("微信加载历史超时，已停止。已收到的文件会保留。")
+        case .scrollStalled: L10n.text("微信滚动持续受限，等待恢复超时，已停止。已收到的文件会保留。")
         case .noMessages: L10n.text("这个时间范围内没有消息。")
         case .selection: L10n.text("无法准确选中这一批消息，已停止。请缩小范围后重试。")
         case .loading: L10n.text("微信消息列表尚未稳定。请等待加载完成后重试。")
@@ -100,6 +103,8 @@ struct WeChatCapture: Sendable {
     /// Exported batches are kept, and no further batch was started: the next
     /// boundary was not proved. A finished request does not set this.
     let boundaryStopped: Bool
+    let stopReason: WeChatExportStopReason?
+    var stoppedEarly: Bool { boundaryStopped || stopReason != nil }
     /// The walk proved it had reached the conversation's first message, so a
     /// request larger than the conversation finished with what was there.
     let reachedHistoryStart: Bool
@@ -141,8 +146,11 @@ final class WeChatAccessibility {
     /// same conversation should not have to feel its way again.
     private var gain = 1.5
     private var gainMeasured = false
-    private var gesturePause = WeChatScrollStep.baseGesturePause
-    private var deltaCeiling = WeChatScrollStep.maximumDelta
+    private var scrollPacing = WeChatScrollPacing()
+    private var gesturePause: Double { scrollPacing.pause }
+    private var deltaCeiling: Int32 { scrollPacing.ceiling }
+    private var pacingEvents: [[String: Any]] = []
+    private var prefetchExit = "notRequested"
     /// The message list, kept across stability checks. Re-found whenever it
     /// stops answering as itself.
     private var settledList: AXUIElement?
@@ -184,6 +192,7 @@ final class WeChatAccessibility {
     private var recoveryAttempts: [[String: Any]] = []
     private var rangeControlState = ""
     private var boundaryStopped = false
+    private var stopReason: WeChatExportStopReason?
     /// Accidental clicks steal the foreground or the message-list focus.
     /// A few of those are put back; a run that keeps losing the chat still stops.
     private var focusRecoveries = 0
@@ -1277,124 +1286,285 @@ final class WeChatAccessibility {
 
     /// Keep requesting the top until history is loaded, then return once. The
     /// wheel fallback is for a list that does not support keyboard focus.
-    private func prefetchHistory(target: Int) throws -> Page {
+    /// Navigation-only warm-up frame. Join notices are legitimate rows here;
+    /// they must not require the message-selection reader to invent a bubble.
+    private struct PrefetchFrame {
+        let list: WCNode
+        let rows: [WCNode]
+        var page: Page { Page(list: list, rows: rows.filter { $0.id == "chat_bubble_item_view" }) }
+        var signature: String {
+            "\(list.rect):" + rows.map { "\($0.id):\($0.role):\($0.rect):\($0.strings)" }.joined(separator: "|")
+        }
+        var data: [WeChatViewportRow] {
+            rows.map { WeChatViewportRow(text: $0.id + $0.role + String(describing: $0.strings), y: $0.rect.minY, height: $0.rect.height) }
+        }
+    }
+
+    /// During warm-up no selection is committed. Return when rows change,
+    /// not after a fixed sleep or two identical whole pages. An unchanged but
+    /// readable frame is returned after 0.8s so top probing can proceed. Missing
+    /// or unmaterialised frames get a bounded read-only wait, never blind input.
+    private func prefetchFrame(after signature: String? = nil) throws -> PrefetchFrame {
+        let started = clock()
+        var fallback: PrefetchFrame?
+        var verified = false
+        repeat {
+            try frontmost()
+            // A later failed read invalidates the prior fallback. In particular,
+            // do not feed a stale apparently quiet prefix into the top proof.
+            fallback = nil
+            if let sample = try sampleList(verifiedHere: &verified), !sample.list.rect.isEmpty {
+                var visible: [WCNode] = []
+                for child in sample.list.children.reversed().prefix(512) {
+                    let node = WCNode(child)
+                    if node.id == "virtual_cell", node.rect.isEmpty { break }
+                    if (node.id == "chat_bubble_item_view" || node.role == "AXStaticText"),
+                       !node.rect.intersection(sample.list.rect).isNull { visible.append(node) }
+                }
+                let rows = Array(visible.reversed())
+                if !rows.isEmpty, rows.allSatisfy({ $0.readError == .success && !$0.strings.isEmpty && !$0.rect.isEmpty }),
+                   zip(rows, rows.dropFirst()).allSatisfy({ $0.rect.minY < $1.rect.minY }) {
+                    let frame = PrefetchFrame(list: sample.list, rows: rows)
+                    fallback = frame
+                    if signature == nil || frame.signature != signature { return frame }
+                }
+            }
+            if clock() - started >= 0.8, let fallback { return fallback }
+            try pause(0.03)
+        } while clock() - started < WeChatScrollPacing.maximumStallSeconds
+        prefetchExit = "loadingTimeout"
+        throw WeChatAutomationError.historyLoadingTimeout
+    }
+
+    private func recordPacing(_ event: String, gain measured: Double? = nil) {
+        var entry: [String: Any] = ["phase": phase, "event": event, "pause": gesturePause,
+                                    "ceiling": Int(deltaCeiling), "batch": exportCount + 1]
+        if let measured, measured.isFinite { entry["gain"] = measured }
+        pacingEvents.append(entry)
+        if pacingEvents.count > 32 { pacingEvents.removeFirst(pacingEvents.count - 32) }
+    }
+
+    private func updatePacing(gain measured: Double) throws {
+        let wasLoading = scrollPacing.isLoading
+        let event = scrollPacing.observe(gain: measured, at: clock())
+        if event == .restored || event == .timedOut || (event == .throttled && !wasLoading) {
+            recordPacing(event.rawValue, gain: measured)
+        }
+        if event == .timedOut { throw WeChatAutomationError.scrollStalled }
+    }
+
+    private func finishScrollSegment() {
+        if scrollPacing.finishSegment() { recordPacing("segmentRestored") }
+    }
+
+    /// A row snapshot used after a wheel gesture still has to be suitable for
+    /// exact selection. Poll in short windows without posting more gestures;
+    /// eight seconds of failed materialisation is a load timeout, not a lost
+    /// next-batch anchor. AX messaging itself retains its existing timeout.
+    private func settledScrollPage() throws -> Page {
+        let deadline = clock() + WeChatScrollPacing.maximumStallSeconds
+        repeat {
+            try check()
+            if scrollPacing.hasTimedOut(at: clock()) { throw WeChatAutomationError.scrollStalled }
+            do { return try stablePage(timeout: min(0.8, max(0.02, deadline - clock()))) }
+            catch WeChatAutomationError.loading { try pause(0.04) }
+        } while clock() < deadline
+        throw WeChatAutomationError.historyLoadingTimeout
+    }
+
+    /// Exactly one warm-up before any selection. Home remains the fast path;
+    /// the wheel fallback uses the same reversible pacing as range navigation.
+    /// Only this phase can return to End. Warming is NOT proof of export count
+    /// or EOF: the selection engine independently verifies both afterwards.
+    private func prefetchHistory(goal: WeChatPrefetchGoal) throws -> Page {
+        let previousPhase = phase
         phase = "prefetch"
         let started = clock()
-        defer { prefetchSeconds = clock() - started }
-        let deadline = started + WeChatPrefetch.budget(messages: target)
-        var page = try returnToLatest(from: try stablePage())
-        // A conversation dragged back this far before — earlier in this run, or
-        // by the user reading it — has nothing to fetch, and the pass costs
-        // nothing beyond the count it just read.
+        defer {
+            prefetchSeconds = clock() - started
+            finishScrollSegment()
+            phase = previousPhase
+        }
+        let deadline = started + goal.timeBudget
+        let first = try prefetchFrame()
+        var page = try returnToLatest(from: first.page)
         var loaded = loadedSlots(page.list.element)
-        // Home focuses the old first row. Once Qt prepends the next history
-        // page, that same focused row moves to index N: N is the number of
-        // added slots. This acknowledges loading without an End round trip.
-        // Slots are only a prefetch estimate; selection still counts messages.
+        prefetchExit = "goalReached"
+        recordPacing("prefetchWindow")
+        if steps.count < 200 {
+            steps.append(["kind": "prefetch-plan", "target": goal.messages,
+                          "padded": goal.paddedSlots, "budget": goal.timeBudget])
+        }
         if try focusList(page) {
-            let padded = target.addingReportingOverflow(max(32, target / 4))
-            let slots = padded.overflow ? Int.max : padded.partialValue
             var homes = 0
-            while loaded < slots, clock() < deadline, homes < 120 {
-                progress(L10n.text("正在加载更早的聊天记录…"))
-                guard let previous = focusedNode() else { throw WeChatAutomationError.focusChanged }
-                try navigationKey(115) // Home
+            var lastProgress = clock()
+            // The first Home only establishes where the current materialised
+            // prefix begins. Only a later, smaller child index proves that Qt
+            // exposed older rows; repeating the same index is not progress.
+            var bestHomeIndex: Int?
+            homeWarmup: while goal.needsMore(loadedSlots: loaded) {
+                try verifyChat()
+                if clock() >= deadline { prefetchExit = "warmupBudget"; break }
+                guard clock() - lastProgress < WeChatScrollPacing.maximumStallSeconds else {
+                    prefetchExit = "loadingTimeout"
+                    break
+                }
+                progress(L10n.text("正在预加载聊天历史…"))
+                guard focusedNode() != nil else { throw WeChatAutomationError.focusChanged }
+                try navigationKey(115) // Home, only before selection begins.
                 homes += 1
-                let loadingDeadline = min(deadline, clock() + 2)
-                var added = 0
+                let loadingDeadline = min(deadline, clock() + 0.8)
+                var advance = WeChatHomeAdvance.pending
                 repeat {
                     try frontmost()
-                    // Focus can briefly be a recycled virtual cell while Qt
-                    // replaces its children. Wait for a materialised row and
-                    // resolve it in this fresh array, never a cached index.
-                    if let focused = focusedNode(), focused.id != "virtual_cell", !focused.rect.isEmpty,
-                       abs(focused.rect.minY - page.list.rect.minY) < 2,
-                       !CFEqual(previous.element, focused.element) || previous.strings != focused.strings,
-                       let children = wcAttribute(page.list.element, "AXChildren") as? [AXUIElement],
-                       let index = children.firstIndex(where: { CFEqual($0, focused.element) }), index > 0 {
-                        added = index
-                        break
+                    if let focused = focusedNode() {
+                        let index = (wcAttribute(page.list.element, "AXChildren") as? [AXUIElement])?
+                            .firstIndex(where: { CFEqual($0, focused.element) })
+                        let landing = WeChatHomeLanding(
+                            childIndex: index,
+                            flushWithListTop: abs(focused.rect.minY - page.list.rect.minY) < 2,
+                            materialized: focused.id != "virtual_cell" && !focused.rect.isEmpty
+                                && focused.readError == .success && !focused.strings.isEmpty
+                        )
+                        advance = WeChatHomeAdvance.judge(bestIndex: bestHomeIndex, landing)
+                        if case .baseline = advance { break }
+                        if case .older = advance { break }
                     }
-                    try pause(0.001)
+                    try pause(0.02)
                 } while clock() < loadingDeadline
-                guard added > 0 else { break }
-                loaded += added
+                switch advance {
+                case .baseline(let index):
+                    bestHomeIndex = index
+                    continue
+                case .older(let distance, let index):
+                    bestHomeIndex = index
+                    let sum = loaded.addingReportingOverflow(distance)
+                    loaded = sum.overflow ? Int.max : sum.partialValue
+                    lastProgress = clock()
+                    continue
+                case .unchanged, .pending:
+                    break
+                }
+                // No closer prefix can mean a notice-only top or a pending
+                // fetch. Reuse the tested raw-prefix proof, not Page. An
+                // inconclusive warm-up is abandoned; exact selection remains
+                // responsible for correctness and can still produce ZIPs.
+                guard let focus = focusedNode() else { throw WeChatAutomationError.focusChanged }
+                var probeKeys = 0
+                do {
+                    switch try probeKeyboardTop(from: focus, keys: &probeKeys) {
+                    case .top:
+                        prefetchExit = "clientHistoryStart"
+                        break homeWarmup
+                    case .moved:
+                        lastProgress = clock()
+                        continue
+                    }
+                } catch WeChatAutomationError.historyUnconfirmed {
+                    prefetchExit = "unconfirmedAfterLoadingWait"
+                    break homeWarmup
+                }
             }
-            if homes > 0 {
-                page = try returnToLatest(from: try stablePage(timeout: 5))
-                loaded = loadedSlots(page.list.element)
-                steps.append(["kind": "prefetch-home", "keys": homes, "loaded": loaded])
+            if steps.count < 200 {
+                var entry: [String: Any] = ["kind": "prefetch-home", "keys": homes,
+                                            "loaded": loaded, "exit": prefetchExit]
+                if let bestHomeIndex { entry["bestIndex"] = bestHomeIndex }
+                steps.append(entry)
             }
-            prefetchLoaded = loaded
-            return page
+        } else if goal.needsMore(loadedSlots: loaded) {
+            _ = try dragBack(goal: goal, loaded: loaded, deadline: deadline)
         }
-        var rounds = 0
-        while loaded < target, clock() < deadline, rounds < 3 {
-            rounds += 1
-            page = try dragBack(from: page, loaded: loaded, target: target, deadline: deadline)
-            // The count only means anything back at the newest message, so
-            // this is both the return leg and the measurement.
-            page = try returnToLatest(from: page)
-            let reached = loadedSlots(page.list.element)
-            // A round that loaded nothing is at the start of the conversation.
-            guard reached > loaded else { break }
-            loaded = reached
-        }
-        prefetchLoaded = loaded
-        // A gap the pass had to stretch belongs to the history it was reading
-        // off disk, not to the loaded rows the batches now scroll over. What it
-        // managed to tighten is worth keeping.
-        gesturePause = min(gesturePause, WeChatScrollStep.baseGesturePause)
+        // Do not ask stablePage to read a notice-only top before pressing End.
+        // The original return-to-latest verification runs after navigation.
+        let oldest = try prefetchFrame()
+        page = try returnToLatest(from: oldest.page)
+        prefetchLoaded = loadedSlots(page.list.element)
         return page
     }
 
-    /// One climb back through the conversation, from the newest message.
-    ///
-    /// Nothing here is tracked, clicked or selected — the climb only needs
-    /// WeChat to fetch the rows — so gestures go out in bursts with one settled
-    /// snapshot per burst instead of per gesture, and the rows a burst covered
-    /// are counted from the overlap it left, or estimated past it when it left
-    /// none. That estimate is why the caller checks the loaded count afterwards
-    /// rather than trusting this to have gone far enough.
-    private func dragBack(from start: Page, loaded: Int, target: Int, deadline: Double) throws -> Page {
-        phase = "prefetch"
-        var page = start
-        var travelled = page.rows.count
-        var burst = WeChatPrefetch.firstBurst
-        var perGesture = WeChatPrefetch.reach(delta: deltaCeiling)
-        var idle = 0
-        while travelled < target, clock() < deadline {
-            progress(L10n.format("正在加载更早的聊天记录 · 已加载 %d 条", max(loaded, travelled)))
-            let before = page
-            for _ in 0..<burst { try scroll(before.list.element, delta: deltaCeiling, settle: gesturePause) }
-            // A conversation being read off disk settles later than one in
-            // memory, and this is the pass that meets it there.
-            page = try stablePage(timeout: 5)
-            guard page.signature != before.signature else {
-                // Either the conversation has no more history, or WeChat is
-                // still fetching it. One more burst, spaced further apart,
-                // tells the two apart.
-                idle += 1
-                gesturePause = WeChatScrollStep.lengthened(gesturePause)
-                if idle >= 2 { break }
+    /// Warming is an optimisation, not a correctness gate. A navigation or
+    /// loading failure here falls back to the ordinary `.latest` selection
+    /// path, which independently returns to the live bottom and verifies the
+    /// first batch. Foreground/chat identity failures still stop immediately.
+    private func bestEffortPrefetch(goal: WeChatPrefetchGoal) throws -> Page? {
+        do { return try prefetchHistory(goal: goal) }
+        catch let error as WeChatAutomationError {
+            let reason: String
+            switch error {
+            case .historyIncomplete: reason = "historyIncomplete"
+            case .historyUnconfirmed: reason = "historyUnconfirmed"
+            case .selection: reason = "selection"
+            case .loading: reason = "loading"
+            case .historyLoadingTimeout: reason = "historyLoadingTimeout"
+            case .scrollStalled: reason = "scrollStalled"
+            default: throw error
+            }
+            let previousExit = prefetchExit
+            prefetchExit = "fallback-" + reason
+            if steps.count < 200 {
+                steps.append(["kind": "prefetch-fallback", "reason": reason,
+                              "previousExit": previousExit, "target": goal.messages])
+            }
+            return nil
+        }
+    }
+
+    /// One bounded warm-up sweep, with two navigation frames in memory.
+    /// About 70% of a screen leaves overlap for measuring actual wheel gain.
+    /// A complete screen change may estimate warm-up progress, NEVER message
+    /// ordinals. The initial-window deadline is always finite.
+    private func dragBack(goal: WeChatPrefetchGoal, loaded: Int, deadline: Double) throws -> PrefetchFrame {
+        var frame = try prefetchFrame()
+        var travelled = 0
+        var lastProgress = clock()
+        var top = WeChatHistoryTopProbe()
+        while goal.needsMore(loadedSlots: max(loaded, travelled)) {
+            try verifyChat()
+            if clock() >= deadline { prefetchExit = "warmupBudget"; break }
+            guard clock() - lastProgress < WeChatScrollPacing.maximumStallSeconds else {
+                prefetchExit = "scrollStalled"
+                break
+            }
+            progress(L10n.text("正在预加载聊天历史…"))
+            let tallest = frame.rows.map(\.rect.height).max() ?? frame.list.rect.height
+            let reach = WeChatScrollStep.reach(listHeight: frame.list.rect.height, tallestRow: tallest,
+                                               gainMeasured: gainMeasured, reachFactor: 1)
+            let delta = WeChatScrollStep.delta(reach: reach, gain: gain, ceiling: deltaCeiling)
+            let before = frame
+            try scroll(before.list.element, delta: delta, settle: gesturePause)
+            frame = try prefetchFrame(after: before.signature)
+            let step = WeChatPrefetch.burst(from: before.data, to: frame.data, gestures: 1,
+                                            delta: delta, reach: Double(delta) * gain)
+            if let points = step.pointsPerGesture {
+                let measured = points / Double(delta)
+                try updatePacing(gain: measured)
+                if WeChatScrollStep.isPlausible(gain: measured) { gain = measured; gainMeasured = true }
+            } else {
+                // No overlap supplies no measured gain. It may estimate warm-up
+                // distance, but cannot cancel an active loading deadline or
+                // manufacture the two healthy measurements required for recovery.
+                try updatePacing(gain: .nan)
+            }
+            if frame.signature != before.signature {
+                lastProgress = clock()
+                let sum = travelled.addingReportingOverflow(step.rows)
+                travelled = sum.overflow ? Int.max : sum.partialValue
+                prefetchRows = travelled
+                _ = top.observe([], at: clock())
                 continue
             }
-            idle = 0
-            let step = WeChatPrefetch.burst(from: before.data, to: page.data,
-                                            gestures: burst, delta: deltaCeiling, reach: perGesture)
-            travelled += step.rows
-            prefetchRows += step.rows
-            // A burst that left overlap is one WeChat clamped, and that is the
-            // only kind whose reach can be measured. Keeping a plausible one
-            // also hands the first batch a measured step instead of a careful.
-            if let measured = step.pointsPerGesture {
-                let gained = measured / Double(deltaCeiling)
-                if WeChatScrollStep.isPlausible(gain: gained) { perGesture = measured; gain = gained; gainMeasured = true }
+            // First CHILD, not first visible bubble: virtual prefixes, an
+            // oversized row above the edge and AXBusy all prevent a top proof.
+            let first = frame.list.children.first.map(WCNode.init)
+            let prefix = first.map { [historyRow($0)] } ?? []
+            let edge = first.map { $0.rect.minY >= frame.list.rect.minY - 3 && $0.rect.minY < frame.list.rect.maxY } ?? false
+            let busy = (wcAttribute(frame.list.element, "AXBusy") as? NSNumber)?.boolValue == true
+            if top.observe(prefix, at: clock(), busy: busy, leadingEdgeVisible: edge) {
+                prefetchExit = "clientHistoryStart"
+                break
             }
-            burst = WeChatPrefetch.nextBurst(burst, clamped: step.clamped)
-            gesturePause = WeChatPrefetch.nextPause(gesturePause, clamped: step.clamped)
         }
-        return page
+        return frame
     }
 
     /// End jumps through the loaded history immediately. Verified wheel
@@ -1886,6 +2056,7 @@ final class WeChatAccessibility {
     }
 
     private func selectBatch(limit: Int, start: SelectionStart, latestPage: Page? = nil) throws -> Selection {
+        defer { finishScrollSegment() }
         phase = "select-anchor"
         let anchorIndex: Int, anchorPage: Page
         var resumedFromKeyboard = false
@@ -2017,7 +2188,7 @@ final class WeChatAccessibility {
         // spend them: the fourth batch of 100 is pinned on the top edge too.
         var nudgeAttempts = 0
         // Backed off by half whenever a step outruns the viewport tracker.
-        var reachFactor = 1.0, overshoots = 0, healthySteps = 0
+        var reachFactor = 1.0, overshoots = 0
         var budget = NavigationBudget(deadline: clock() + 35, maximumSteps: 120)
         func capped(_ button: WCNode?) -> Bool {
             button?.strings.contains { $0.filter { !$0.isWhitespace } == "最多选择100条" } == true
@@ -2105,7 +2276,7 @@ final class WeChatAccessibility {
             }
             let before = page
             try scroll(page.list.element, delta: delta, settle: gesturePause)
-            page = try stablePage()
+            page = try settledScrollPage()
             unchanged = page.signature == before.signature ? unchanged + 1 : 0
             guard unchanged < 3 else {
                 // The list is not moving. That is either WeChat fetching more
@@ -2175,18 +2346,10 @@ final class WeChatAccessibility {
                               "gain": (measured * 100).rounded() / 100, "pause": (gesturePause * 100).rounded() / 100,
                               "ordinal": tracked.firstOrdinal, "want": limit - 1])
             }
+            try updatePacing(gain: measured)
             if WeChatScrollStep.isPlausible(gain: measured) {
                 gain = measured; gainMeasured = true
                 reachFactor = min(1, reachFactor * 1.5)
-                healthySteps += 1
-                gesturePause = WeChatScrollStep.shortened(gesturePause, healthySteps: healthySteps)
-            } else if measured < 0.4 {
-                // The gesture was clamped — WeChat is loading older history.
-                // Steering by this would ask for a larger gesture and clamp
-                // harder; wait longer for the load instead.
-                healthySteps = 0
-                gesturePause = WeChatScrollStep.lengthened(gesturePause)
-                deltaCeiling = max(300, deltaCeiling / 2)
             }
         }
     }
@@ -2441,11 +2604,14 @@ final class WeChatAccessibility {
     }
 
     private func diagnostics(started: Double, outcome: String, count: Int) {
-        let report: [String: Any] = ["schemaVersion": 8, "strategy": "native-keyboard-range", "at": ISO8601DateFormatter().string(from: Date()),
+        let report: [String: Any] = ["schemaVersion": 9, "strategy": "native-keyboard-range", "at": ISO8601DateFormatter().string(from: Date()),
             "outcome": outcome, "phase": phase, "seconds": clock() - started, "messageCount": count,
             "navigationKeys": navigationKeys, "keyboardMessages": keyboardMessages, "keyboardTargetReached": keyboardTargetReached,
             "focusedMessage": focusedMessageLog, "snapshotRejectReason": snapshotRejectReason,
             "historyBoundary": historyBoundaryLog,
+            "prefetchExit": prefetchExit, "pacingEvents": pacingEvents,
+            "scrollPause": gesturePause, "scrollCeiling": Int(deltaCeiling),
+            "stopReason": stopReason?.rawValue ?? "none",
             "appVersion": Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "unknown",
             "appBuild": Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "unknown",
             "recoveryAttempts": recoveryAttempts, "rangeControlState": rangeControlState, "boundaryStopped": boundaryStopped,
@@ -2470,13 +2636,14 @@ final class WeChatAccessibility {
         progress(L10n.text("正在打开微信群聊…"))
         try openChat()
         let selfSender = identifySelf ? try currentAccountNickname() : nil
-        // Anything past one native batch reaches history WeChat has not
-        // materialised yet. Load it in one pass now rather than a gesture at a
-        // time inside every batch's budget. The whole conversation has no
-        // count to load towards; its batches meet the fetches as usual.
+        // Plan once, outside the batch loop. Ordinary long exports warm only
+        // a bounded initial window, so a multi-year chat can start producing
+        // native ZIPs without first materialising its entire client history.
+        // Incremental runs remain bounded by their existing 40-batch overlap.
         let latestPage: Page?
-        if !range.isUnlimited, range.value > WeChatPrefetch.threshold { latestPage = try prefetchHistory(target: range.value) }
-        else { latestPage = nil }
+        if let goal = WeChatPrefetchPlan.goal(requestedMessages: range.value, incremental: checkpoint != nil) {
+            latestPage = try bestEffortPrefetch(goal: goal)
+        } else { latestPage = nil }
         var directories: [URL] = []
         var batchMessageCounts: [Int] = []
         var start = SelectionStart.latest
@@ -2506,10 +2673,15 @@ final class WeChatAccessibility {
                 // Keep and deliver committed batches, but never mark a partial
                 // run as complete or advance an incremental checkpoint.
                 switch error {
-                case .historyUnconfirmed, .historyIncomplete, .selection, .loading:
+                case .historyUnconfirmed, .historyIncomplete, .selection, .loading, .historyLoadingTimeout, .scrollStalled:
                     guard !directories.isEmpty, checkpoint == nil else { throw error }
-                    boundaryStopped = true
-                    steps.append(["kind": "partial-capture", "batches": directories.count, "counted": selectedCount])
+                    switch error {
+                    case .loading, .historyLoadingTimeout: stopReason = .historyLoadingTimeout
+                    case .scrollStalled: stopReason = .scrollStalled
+                    default: stopReason = phase == "next-batch-anchor" ? .nextBatchAnchor : .rangeEndpoint
+                    }
+                    boundaryStopped = stopReason?.isBoundary == true
+                    steps.append(["kind": "partial-capture", "batches": directories.count, "counted": selectedCount, "reason": stopReason?.rawValue ?? "unknown"])
                     break
                 default: throw error
                 }
@@ -2559,6 +2731,7 @@ final class WeChatAccessibility {
             if selected.reachedConversationTop { reachedHistoryStart = true }
             if checkpoint == nil, WeChatBatchBoundary.warnStoppedEarly(boundaryConfirmed: selected.boundaryConfirmed, reachedHistoryStart: selected.reachedConversationTop, requestSatisfied: requestSatisfied) {
                 boundaryStopped = true
+                stopReason = .rangeEndpoint
             }
             if checkpoint == nil {
                 conversationEnded = !WeChatBatchBoundary.resumeNextBatch(boundaryConfirmed: selected.boundaryConfirmed, reachedHistoryStart: selected.reachedConversationTop) || requestSatisfied
@@ -2566,8 +2739,8 @@ final class WeChatAccessibility {
                 throw WeChatAutomationError.incrementUnconfirmed
             }
         }
-        phase = "complete"; outcome = boundaryStopped ? "stopped" : "exported"
+        phase = "complete"; outcome = (boundaryStopped || stopReason != nil) ? "stopped" : "exported"
         return WeChatCapture(directories: directories, batchMessageCounts: batchMessageCounts, messageCount: count, readSeconds: 0, captureSeconds: clock() - started,
-                             selfSender: selfSender, boundaryStopped: boundaryStopped, reachedHistoryStart: reachedHistoryStart, increment: increment)
+                             selfSender: selfSender, boundaryStopped: boundaryStopped, stopReason: stopReason, reachedHistoryStart: reachedHistoryStart, increment: increment)
     }
 }

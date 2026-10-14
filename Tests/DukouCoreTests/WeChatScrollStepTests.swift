@@ -10,12 +10,12 @@ final class WeChatScrollStepTests: XCTestCase {
     }
 
     /// The whole point: on a text conversation a measured step travels about
-    /// twice as far, and still leaves the tallest row's worth of overlap.
+    /// 70% of a screen, and still leaves the tallest row's worth of overlap.
     func testMeasuredStepLeavesOneRowOfOverlap() {
         let tallest: CGFloat = 98
         let reach = WeChatScrollStep.reach(listHeight: listHeight, tallestRow: tallest, gainMeasured: true, reachFactor: 1)
-        XCTAssertEqual(reach, listHeight - tallest - 24, accuracy: 0.001)
-        XCTAssertGreaterThan(reach, WeChatScrollStep.careful(listHeight: listHeight) * 1.9)
+        XCTAssertEqual(reach, min(listHeight * 0.7, listHeight - tallest - 24), accuracy: 0.001)
+        XCTAssertGreaterThan(reach, WeChatScrollStep.careful(listHeight: listHeight) * 1.7)
         XCTAssertLessThanOrEqual(reach + tallest, listHeight)
     }
 

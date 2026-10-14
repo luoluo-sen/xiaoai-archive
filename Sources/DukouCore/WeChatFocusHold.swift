@@ -126,6 +126,22 @@ public enum WeChatFocusClearance {
     /// A cap with the bubble already clear of the edge still gets one small
     /// shove toward older messages, never a step the size of a navigation scroll.
     public static let capNudge = 10.0
+    /// A keyboard-pinned row ignores a few points of scroll and stays glued to
+    /// the top edge. One short row is enough to leave the range button's inset
+    /// without sending the endpoint off this screen. Taller bubbles stop here.
+    public static let pinnedScrollLimit = 140.0
+
+    public static func pinnedClearance(rowHeight: Double) -> Double {
+        let row = rowHeight.isFinite && rowHeight > 0 ? rowHeight : 80
+        return min(pinnedScrollLimit, max(48, row))
+    }
+
+    /// Each batch owns this many viewport nudges. Earlier batches in the same
+    /// chat must not spend them: a keyboard walk pins every 100th message on
+    /// the top edge, so every batch needs its own clearance.
+    public static func allowsAnotherAttempt(_ batchAttempts: Int) -> Bool {
+        batchAttempts < maximumAttempts
+    }
 
     /// Points to scroll toward older messages so the bubble's top sits about
     /// `preferred` below the list's top. Nil when the gap is already usable.
@@ -142,11 +158,22 @@ public enum WeChatNudge {
     /// Scroll units whose expected movement is `points`, using the run's
     /// measured gain. An unmeasured or implausible gain uses the engine's
     /// starting 1.5 rather than a gesture large enough to clamp.
-    public static func units(points: Double, gain: Double) -> Int32 {
-        let clamped = min(30, max(WeChatFocusClearance.capNudge, points))
+    public static func units(points: Double, gain: Double, limit: Double = 30, maxUnits: Int32 = 40) -> Int32 {
+        let clamped = min(limit, max(WeChatFocusClearance.capNudge, points))
         let safeGain = WeChatScrollStep.isPlausible(gain: gain) ? gain : 1.5
         let units = Int((clamped / safeGain).rounded())
-        return Int32(max(1, min(40, units)))
+        return Int32(max(1, min(Int(maxUnits), units)))
+    }
+
+    /// Attempt 0 asks for the clearance the row still needs. A gesture the
+    /// list ignored grows by half on the next try, and stops at 30 points so
+    /// the keyboard row stays on this screen.
+    public static func retryPoints(base: Double, attempt: Int) -> Double {
+        var points = min(30, max(WeChatFocusClearance.capNudge, base))
+        for _ in 0..<max(0, attempt) {
+            points = min(30, points * 1.5)
+        }
+        return points
     }
 }
 

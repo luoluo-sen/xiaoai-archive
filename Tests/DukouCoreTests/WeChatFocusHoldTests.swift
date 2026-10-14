@@ -85,6 +85,32 @@ final class WeChatFocusHoldTests: XCTestCase {
         XCTAssertEqual(WeChatNudge.units(points: 20, gain: 0.05), 13)
     }
 
+    func testEachBatchKeepsItsOwnNudgeBudget() {
+        XCTAssertTrue(WeChatFocusClearance.allowsAnotherAttempt(0))
+        XCTAssertTrue(WeChatFocusClearance.allowsAnotherAttempt(2))
+        XCTAssertFalse(WeChatFocusClearance.allowsAnotherAttempt(3))
+        // Three earlier batches of 100 do not spend the next batch's attempts.
+        XCTAssertTrue(WeChatFocusClearance.allowsAnotherAttempt(0))
+    }
+
+    func testAPinnedKeyboardRowAsksForAboutOneRowOfClearance() {
+        XCTAssertEqual(WeChatFocusClearance.pinnedClearance(rowHeight: 79), 79)
+        XCTAssertEqual(WeChatFocusClearance.pinnedClearance(rowHeight: 289), 140)
+        XCTAssertEqual(WeChatFocusClearance.pinnedClearance(rowHeight: 20), 48)
+        XCTAssertEqual(WeChatNudge.units(points: 79, gain: 1.5, limit: 140, maxUnits: 100), 53)
+        XCTAssertEqual(WeChatNudge.units(points: 20, gain: 1.5), 13)
+    }
+
+    func testAnIgnoredNudgeGrowsWithoutLeavingTheSmallStepCap() {
+        XCTAssertEqual(WeChatNudge.retryPoints(base: 16, attempt: 0), 16)
+        XCTAssertEqual(WeChatNudge.retryPoints(base: 16, attempt: 1), 24)
+        XCTAssertEqual(WeChatNudge.retryPoints(base: 16, attempt: 2), 30)
+        XCTAssertEqual(WeChatNudge.retryPoints(base: 16, attempt: 5), 30)
+        XCTAssertEqual(WeChatNudge.retryPoints(base: 12, attempt: 1), 18)
+        XCTAssertEqual(WeChatNudge.retryPoints(base: 40, attempt: 0), 30)
+        XCTAssertEqual(WeChatNudge.retryPoints(base: 4, attempt: 0), WeChatFocusClearance.capNudge)
+    }
+
     func testOnlyASettledViewportMayStartAnotherBatch() {
         XCTAssertTrue(WeChatBatchBoundary.resumeNextBatch(boundaryConfirmed: true, reachedHistoryStart: false))
         XCTAssertFalse(WeChatBatchBoundary.resumeNextBatch(boundaryConfirmed: true, reachedHistoryStart: true))

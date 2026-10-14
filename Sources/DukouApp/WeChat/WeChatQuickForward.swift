@@ -399,6 +399,7 @@ final class WeChatQuickForward: ObservableObject {
                 for (index, job) in jobs.enumerated() {
                     try token.check()
                     activeID = job.id
+                    self.error = nil
                     if let id = job.id {
                         self.updateBatchRow(id: id, state: .running, detail: nil)
                         self.batchPrefix = L10n.format("第 %d/%d 个群 · %@", index + 1, jobs.count, job.preset.chat)

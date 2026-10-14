@@ -178,6 +178,9 @@ final class WeChatAccessibility {
     private var keyboardTargetElement: AXUIElement?
     private var focusedMessageLog: [String: Any] = [:]
     private var snapshotRejectReason = ""
+    /// Diagnostic log for the whole chat. It is not a per-batch budget:
+    /// every full batch of 100 pins its endpoint on the top edge and needs
+    /// its own nudges.
     private var recoveryAttempts: [[String: Any]] = []
     private var rangeControlState = ""
     private var boundaryStopped = false
@@ -978,27 +981,61 @@ final class WeChatAccessibility {
     /// Scroll the viewport toward older messages without sending an arrow key.
     /// A focus that lands on a different bubble — including another copy of the
     /// same text — stops the nudge. The caller must not then press Down to
-    /// hunt for the row it lost.
-    private func nudgeOlder(from current: WCNode, ordinal: Int, list: WCNode, forced: Bool) throws -> WCNode? {
-        let points = WeChatFocusClearance.olderNudge(rowY: current.rect.minY, listTop: list.rect.minY) ?? (forced ? WeChatFocusClearance.capNudge : nil)
-        guard let points else { return current }
+    /// hunt for the row it lost. `attempt` is this batch's count, not the
+    /// chat's: an ignored gesture asks for a larger clearance next time.
+    private func nudgeOlder(from current: WCNode, ordinal: Int, list: WCNode, forced: Bool, attempt: Int = 0) throws -> WCNode? {
+        let base = WeChatFocusClearance.olderNudge(rowY: current.rect.minY, listTop: list.rect.minY) ?? (forced ? WeChatFocusClearance.capNudge : nil)
+        guard let base else { return current }
+        let points = WeChatNudge.retryPoints(base: base, attempt: attempt)
         let units = WeChatNudge.units(points: points, gain: gain)
         let target = focusMessage(current, ordinal: ordinal)
         try scroll(list.element, delta: units, settle: gesturePause)
-        guard let now = focusedNode() else {
-            recoveryAttempts.append(["attempt": recoveryAttempts.count + 1, "points": points, "units": Int(units), "held": false, "verdict": "missing"])
+        // The ended phase returns before Qt redraws. Judging the old frame
+        // reports every nudge as unmoved and spends the batch's budget on a
+        // gesture that had not happened yet.
+        guard let now = try focusAfterNudge(from: current) else {
+            noteNudge(attempt: attempt, points: points, units: units, held: false, verdict: "missing", shift: nil)
             return nil
         }
         let shift = Double(now.rect.minY - current.rect.minY)
         let verdict = WeChatFocusHold.judge(current: focusMessage(now, ordinal: ordinal), target: target, elementMatches: CFEqual(now.element, current.element), expectedShift: points, slack: max(8, points * 0.6))
         let held = verdict == .held || verdict == .unmoved
-        recoveryAttempts.append(["attempt": recoveryAttempts.count + 1, "points": points, "units": Int(units), "held": held, "verdict": "\(verdict)", "shift": shift])
+        noteNudge(attempt: attempt, points: points, units: units, held: held, verdict: "\(verdict)", shift: shift)
         guard held else { return nil }
         if verdict == .held, units != 0 {
             let measured = shift / Double(units)
             if WeChatScrollStep.isPlausible(gain: measured) { gain = measured; gainMeasured = true }
         }
         return now
+    }
+
+    /// The focused row after a gesture scroll, once its vertical position has
+    /// changed or a short wait shows that WeChat ignored the gesture.
+    private func focusAfterNudge(from current: WCNode) throws -> WCNode? {
+        let deadline = clock() + 0.45
+        var last: WCNode?
+        while true {
+            guard let node = focusedNode() else { return last }
+            last = node
+            if abs(Double(node.rect.minY - current.rect.minY)) > 1 { return node }
+            guard clock() < deadline else { return node }
+            try pause(0.02)
+        }
+    }
+
+    private func noteNudge(attempt: Int, points: Double, units: Int32, held: Bool, verdict: String, shift: Double?) {
+        var entry: [String: Any] = [
+            "attempt": recoveryAttempts.count + 1,
+            "batch": exportCount + 1,
+            "batchAttempt": attempt + 1,
+            "phase": phase,
+            "points": points,
+            "units": Int(units),
+            "held": held,
+            "verdict": verdict,
+        ]
+        if let shift { entry["shift"] = shift }
+        recoveryAttempts.append(entry)
     }
 
     /// Pointer equality is not enough: a recycled cell keeps the pointer and
@@ -1819,7 +1856,7 @@ final class WeChatAccessibility {
         var tracked = initialTracked
         guard var current = focusedNode() else { throw WeChatAutomationError.selection }
         let ordinal = limit - 1
-        for _ in 0..<WeChatFocusClearance.maximumAttempts {
+        for attempt in 0..<WeChatFocusClearance.maximumAttempts {
             guard let index = tracked.index(of: ordinal) ?? indexOfFocus(current, in: page), page.rows.indices.contains(index) else {
                 throw WeChatAutomationError.selection
             }
@@ -1837,7 +1874,7 @@ final class WeChatAccessibility {
             }
             let flush = WeChatFocusClearance.olderNudge(rowY: page.rows[index].rect.minY, listTop: page.list.rect.minY) != nil
             guard label == .capped || flush else { break }
-            guard let nudged = try nudgeOlder(from: current, ordinal: ordinal, list: page.list, forced: label == .capped) else {
+            guard let nudged = try nudgeOlder(from: current, ordinal: ordinal, list: page.list, forced: label == .capped, attempt: attempt) else {
                 throw WeChatAutomationError.selection
             }
             current = nudged
@@ -1976,6 +2013,9 @@ final class WeChatAccessibility {
         }
         phase = "select-range"
         var unchanged = 0
+        // This batch's viewport nudges. The run-wide recovery log must not
+        // spend them: the fourth batch of 100 is pinned on the top edge too.
+        var nudgeAttempts = 0
         // Backed off by half whenever a step outruns the viewport tracker.
         var reachFactor = 1.0, overshoots = 0, healthySteps = 0
         var budget = NavigationBudget(deadline: clock() + 35, maximumSteps: 120)
@@ -2022,11 +2062,12 @@ final class WeChatAccessibility {
                         // Keep the keyboard row. A few points toward older
                         // messages moves that bubble down off the edge; a Down
                         // key would make it the previous message.
-                        if usedKeyboard, recoveryAttempts.count < WeChatFocusClearance.maximumAttempts {
+                        if usedKeyboard, WeChatFocusClearance.allowsAnotherAttempt(nudgeAttempts) {
                             guard let focused = focusedNode(),
-                                  let nudged = try nudgeOlder(from: focused, ordinal: limit - 1, list: page.list, forced: true) else {
+                                  let nudged = try nudgeOlder(from: focused, ordinal: limit - 1, list: page.list, forced: true, attempt: nudgeAttempts) else {
                                 throw WeChatAutomationError.selection
                             }
+                            nudgeAttempts += 1
                             page = try pageAfterScroll()
                             if let idx = indexOfFocus(nudged, in: page) {
                                 tracked = WeChatViewport(rows: page.data, anchorIndex: idx, anchorOrdinal: limit - 1)
@@ -2049,22 +2090,18 @@ final class WeChatAccessibility {
                     }
                 }
                 if usedKeyboard, WeChatFocusClearance.olderNudge(rowY: row.rect.minY, listTop: page.list.rect.minY) != nil {
-                    // The endpoint is against the top edge, so the range control
-                    // will not take it. Move the viewport, not the keyboard row.
-                    guard recoveryAttempts.count < WeChatFocusClearance.maximumAttempts,
-                          let focused = focusedNode(),
-                          let nudged = try nudgeOlder(from: focused, ordinal: limit - 1, list: page.list, forced: false) else {
-                        throw WeChatAutomationError.selection
-                    }
-                    page = try pageAfterScroll()
-                    if let idx = indexOfFocus(nudged, in: page) {
-                        tracked = WeChatViewport(rows: page.data, anchorIndex: idx, anchorOrdinal: limit - 1)
-                    }
-                    continue
+                    // Qt pins this keyboard row to the top and absorbs a nudge of
+                    // a few points, so the range button never becomes usable and
+                    // a three-try budget stops the batch. Ask for about one row.
+                    // The scroll below still has to keep this same message in
+                    // focus; a miss is the loop's ordinary overshoot, not a stop.
+                    let points = WeChatFocusClearance.pinnedClearance(rowHeight: Double(row.rect.height))
+                    delta = WeChatNudge.units(points: points, gain: gain, limit: WeChatFocusClearance.pinnedScrollLimit, maxUnits: 100)
+                } else {
+                    let distance = page.list.rect.minY + 8 - row.rect.minY
+                    let amount = Int((distance / max(1, gain)).rounded())
+                    delta = Int32(max(-250, min(250, amount == 0 ? (distance >= 0 ? 1 : -1) : amount)))
                 }
-                let distance = page.list.rect.minY + 8 - row.rect.minY
-                let amount = Int((distance / max(1, gain)).rounded())
-                delta = Int32(max(-250, min(250, amount == 0 ? (distance >= 0 ? 1 : -1) : amount)))
             }
             let before = page
             try scroll(page.list.element, delta: delta, settle: gesturePause)

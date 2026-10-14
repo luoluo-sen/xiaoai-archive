@@ -22,11 +22,15 @@ enum LongHistoryScenarios {
 
     static func all() -> [Scenario] {
         [
-            Scenario("all history preloads") {
-                try expect(WeChatPrefetchPlan.goal(requestedMessages: 0) == .allHistory)
+            Scenario("all history warms only the initial window") {
+                let goal = WeChatPrefetchPlan.goal(requestedMessages: 0)
+                try expect(goal?.messages == WeChatPrefetchPlan.initialWindowMessages)
+                try expect(goal?.timeBudget == WeChatPrefetchPlan.maximumInitialSeconds)
             },
-            Scenario("long finite requests preload") {
-                for n in [101, 300, 4000] { try expect(WeChatPrefetchPlan.goal(requestedMessages: n) == .messages(n)) }
+            Scenario("long finite requests cap their initial window") {
+                try expect(WeChatPrefetchPlan.goal(requestedMessages: 101)?.messages == 101)
+                try expect(WeChatPrefetchPlan.goal(requestedMessages: 300)?.messages == 300)
+                try expect(WeChatPrefetchPlan.goal(requestedMessages: 4000)?.messages == 300)
             },
             Scenario("one batch and invalid input skip prefetch") {
                 for n in [-1, 1, 99, 100] { try expect(WeChatPrefetchPlan.goal(requestedMessages: n) == nil) }
@@ -40,19 +44,20 @@ enum LongHistoryScenarios {
             Scenario("incremental does not warm unlimited history") {
                 for n in [0, 100, 4000, Int.max] { try expect(WeChatPrefetchPlan.goal(requestedMessages: n, incremental: true) == nil) }
             },
-            Scenario("full history has no arbitrary total time cap") {
-                try expect(WeChatPrefetchGoal.allHistory.timeBudget == nil)
-                try expect(WeChatPrefetchGoal.allHistory.needsMore(loadedSlots: Int.max))
+            Scenario("initial window is three native batches") {
+                try expect(WeChatPrefetchPlan.initialWindowBatches == 3)
+                try expect(WeChatPrefetchPlan.initialWindowMessages == 300)
             },
-            Scenario("finite warm-up budget stays bounded") {
-                try expect(WeChatPrefetchGoal.messages(300).timeBudget == 130)
-                try expect(WeChatPrefetchGoal.messages(Int.max).timeBudget == 180)
+            Scenario("initial warm-up budget stays bounded") {
+                try expect(WeChatPrefetchPlan.goal(requestedMessages: 101)?.timeBudget == 30)
+                try expect(WeChatPrefetchPlan.goal(requestedMessages: Int.max)?.timeBudget == 30)
             },
-            Scenario("finite goal includes padding and saturates safely") {
-                try expect(WeChatPrefetchGoal.messages(300).paddedSlots == 375)
-                try expect(WeChatPrefetchGoal.messages(300).needsMore(loadedSlots: 374))
-                try expect(!WeChatPrefetchGoal.messages(300).needsMore(loadedSlots: 375))
-                try expect(WeChatPrefetchGoal.messages(Int.max).paddedSlots == Int.max)
+            Scenario("bounded goal includes padding and saturates safely") {
+                let goal = WeChatPrefetchGoal(messages: 300, timeBudget: 30)
+                try expect(goal.paddedSlots == 375)
+                try expect(goal.needsMore(loadedSlots: 374))
+                try expect(!goal.needsMore(loadedSlots: 375))
+                try expect(WeChatPrefetchGoal(messages: Int.max, timeBudget: 30).paddedSlots == Int.max)
             },
             Scenario("50-point clamp is temporary") {
                 var p = WeChatScrollPacing(pause: 0.08)
@@ -178,6 +183,42 @@ enum LongHistoryScenarios {
                 try expect(WeChatFocusClearance.pinnedClearance(rowHeight: 79) == 79)
                 try expect(WeChatFocusClearance.pinnedClearance(rowHeight: 289) == 140)
                 try expect(WeChatFocusClearance.pinnedClearance(rowHeight: 20) == 48)
+            },
+            Scenario("first Home landing establishes a baseline only") {
+                let landing = WeChatHomeLanding(childIndex: 35, flushWithListTop: true, materialized: true)
+                try expect(WeChatHomeAdvance.judge(bestIndex: nil, landing) == .baseline(bestIndex: 35))
+            },
+            Scenario("repeating the same Home prefix is not more history") {
+                let landing = WeChatHomeLanding(childIndex: 35, flushWithListTop: true, materialized: true)
+                try expect(WeChatHomeAdvance.judge(bestIndex: 35, landing) == .unchanged)
+            },
+            Scenario("a lower Home index credits only the distance gained") {
+                try expect(WeChatHomeAdvance.judge(
+                    bestIndex: 35,
+                    WeChatHomeLanding(childIndex: 10, flushWithListTop: true, materialized: true)
+                ) == .older(distance: 25, bestIndex: 10))
+                try expect(WeChatHomeAdvance.judge(
+                    bestIndex: 10,
+                    WeChatHomeLanding(childIndex: 40, flushWithListTop: true, materialized: true)
+                ) == .unchanged)
+            },
+            Scenario("unreadable Home landings never manufacture progress") {
+                try expect(WeChatHomeAdvance.judge(
+                    bestIndex: nil,
+                    WeChatHomeLanding(childIndex: 0, flushWithListTop: true, materialized: true)
+                ) == .unchanged)
+                try expect(WeChatHomeAdvance.judge(
+                    bestIndex: nil,
+                    WeChatHomeLanding(childIndex: 12, flushWithListTop: false, materialized: true)
+                ) == .pending)
+                try expect(WeChatHomeAdvance.judge(
+                    bestIndex: nil,
+                    WeChatHomeLanding(childIndex: nil, flushWithListTop: true, materialized: true)
+                ) == .pending)
+                try expect(WeChatHomeAdvance.judge(
+                    bestIndex: nil,
+                    WeChatHomeLanding(childIndex: 12, flushWithListTop: true, materialized: false)
+                ) == .pending)
             },
             Scenario("loading errors are not boundary errors") {
                 try expect(!WeChatExportStopReason.historyLoadingTimeout.isBoundary)

@@ -1385,65 +1385,92 @@ final class WeChatAccessibility {
             finishScrollSegment()
             phase = previousPhase
         }
-        let deadline = goal.timeBudget.map { started + $0 }
+        let deadline = started + goal.timeBudget
         let first = try prefetchFrame()
         var page = try returnToLatest(from: first.page)
         var loaded = loadedSlots(page.list.element)
         prefetchExit = "goalReached"
-        recordPacing(goal == .allHistory ? "prefetchAll" : "prefetchCount")
+        recordPacing("prefetchWindow")
+        if steps.count < 200 {
+            steps.append(["kind": "prefetch-plan", "target": goal.messages,
+                          "padded": goal.paddedSlots, "budget": goal.timeBudget])
+        }
         if try focusList(page) {
             var homes = 0
             var lastProgress = clock()
-            while goal.needsMore(loadedSlots: loaded) {
+            // The first Home only establishes where the current materialised
+            // prefix begins. Only a later, smaller child index proves that Qt
+            // exposed older rows; repeating the same index is not progress.
+            var bestHomeIndex: Int?
+            homeWarmup: while goal.needsMore(loadedSlots: loaded) {
                 try verifyChat()
-                if let deadline, clock() >= deadline { prefetchExit = "warmupBudget"; break }
+                if clock() >= deadline { prefetchExit = "warmupBudget"; break }
                 guard clock() - lastProgress < WeChatScrollPacing.maximumStallSeconds else {
                     prefetchExit = "loadingTimeout"
-                    throw WeChatAutomationError.historyLoadingTimeout
+                    break
                 }
                 progress(L10n.text("正在预加载聊天历史…"))
-                guard let previous = focusedNode() else { throw WeChatAutomationError.focusChanged }
+                guard focusedNode() != nil else { throw WeChatAutomationError.focusChanged }
                 try navigationKey(115) // Home, only before selection begins.
                 homes += 1
-                let loadingDeadline = min(deadline ?? .greatestFiniteMagnitude, clock() + 0.8)
-                var added = 0
+                let loadingDeadline = min(deadline, clock() + 0.8)
+                var advance = WeChatHomeAdvance.pending
                 repeat {
                     try frontmost()
-                    if let focused = focusedNode(), focused.id != "virtual_cell", !focused.rect.isEmpty,
-                       abs(focused.rect.minY - page.list.rect.minY) < 2,
-                       !CFEqual(previous.element, focused.element) || previous.strings != focused.strings,
-                       let children = wcAttribute(page.list.element, "AXChildren") as? [AXUIElement],
-                       let index = children.firstIndex(where: { CFEqual($0, focused.element) }), index > 0 {
-                        added = index
-                        break
+                    if let focused = focusedNode() {
+                        let index = (wcAttribute(page.list.element, "AXChildren") as? [AXUIElement])?
+                            .firstIndex(where: { CFEqual($0, focused.element) })
+                        let landing = WeChatHomeLanding(
+                            childIndex: index,
+                            flushWithListTop: abs(focused.rect.minY - page.list.rect.minY) < 2,
+                            materialized: focused.id != "virtual_cell" && !focused.rect.isEmpty
+                                && focused.readError == .success && !focused.strings.isEmpty
+                        )
+                        advance = WeChatHomeAdvance.judge(bestIndex: bestHomeIndex, landing)
+                        if case .baseline = advance { break }
+                        if case .older = advance { break }
                     }
                     try pause(0.02)
                 } while clock() < loadingDeadline
-                if added > 0 {
-                    let sum = loaded.addingReportingOverflow(added)
+                switch advance {
+                case .baseline(let index):
+                    bestHomeIndex = index
+                    continue
+                case .older(let distance, let index):
+                    bestHomeIndex = index
+                    let sum = loaded.addingReportingOverflow(distance)
                     loaded = sum.overflow ? Int.max : sum.partialValue
                     lastProgress = clock()
                     continue
+                case .unchanged, .pending:
+                    break
                 }
-                // Zero newly reported slots can mean a notice-only top or a
-                // pending fetch. Reuse the tested raw-prefix proof, not Page.
+                // No closer prefix can mean a notice-only top or a pending
+                // fetch. Reuse the tested raw-prefix proof, not Page. An
+                // inconclusive warm-up is abandoned; exact selection remains
+                // responsible for correctness and can still produce ZIPs.
                 guard let focus = focusedNode() else { throw WeChatAutomationError.focusChanged }
                 var probeKeys = 0
                 do {
                     switch try probeKeyboardTop(from: focus, keys: &probeKeys) {
                     case .top:
                         prefetchExit = "clientHistoryStart"
+                        break homeWarmup
                     case .moved:
                         lastProgress = clock()
                         continue
                     }
                 } catch WeChatAutomationError.historyUnconfirmed {
                     prefetchExit = "unconfirmedAfterLoadingWait"
-                    throw WeChatAutomationError.historyLoadingTimeout
+                    break homeWarmup
                 }
-                break
             }
-            if steps.count < 200 { steps.append(["kind": "prefetch-home", "keys": homes, "loaded": loaded, "exit": prefetchExit]) }
+            if steps.count < 200 {
+                var entry: [String: Any] = ["kind": "prefetch-home", "keys": homes,
+                                            "loaded": loaded, "exit": prefetchExit]
+                if let bestHomeIndex { entry["bestIndex"] = bestHomeIndex }
+                steps.append(entry)
+            }
         } else if goal.needsMore(loadedSlots: loaded) {
             _ = try dragBack(goal: goal, loaded: loaded, deadline: deadline)
         }
@@ -1455,21 +1482,48 @@ final class WeChatAccessibility {
         return page
     }
 
-    /// One forward warm-up sweep, with two bounded frames in memory. About
-    /// 70% of a screen leaves overlap for measuring actual wheel gain. A
-    /// complete screen change may estimate warm-up progress, NEVER message
-    /// ordinals. Full history has no total 180s cap, but a stalled segment does.
-    private func dragBack(goal: WeChatPrefetchGoal, loaded: Int, deadline: Double?) throws -> PrefetchFrame {
+    /// Warming is an optimisation, not a correctness gate. A navigation or
+    /// loading failure here falls back to the ordinary `.latest` selection
+    /// path, which independently returns to the live bottom and verifies the
+    /// first batch. Foreground/chat identity failures still stop immediately.
+    private func bestEffortPrefetch(goal: WeChatPrefetchGoal) throws -> Page? {
+        do { return try prefetchHistory(goal: goal) }
+        catch let error as WeChatAutomationError {
+            let reason: String
+            switch error {
+            case .historyIncomplete: reason = "historyIncomplete"
+            case .historyUnconfirmed: reason = "historyUnconfirmed"
+            case .selection: reason = "selection"
+            case .loading: reason = "loading"
+            case .historyLoadingTimeout: reason = "historyLoadingTimeout"
+            case .scrollStalled: reason = "scrollStalled"
+            default: throw error
+            }
+            let previousExit = prefetchExit
+            prefetchExit = "fallback-" + reason
+            if steps.count < 200 {
+                steps.append(["kind": "prefetch-fallback", "reason": reason,
+                              "previousExit": previousExit, "target": goal.messages])
+            }
+            return nil
+        }
+    }
+
+    /// One bounded warm-up sweep, with two navigation frames in memory.
+    /// About 70% of a screen leaves overlap for measuring actual wheel gain.
+    /// A complete screen change may estimate warm-up progress, NEVER message
+    /// ordinals. The initial-window deadline is always finite.
+    private func dragBack(goal: WeChatPrefetchGoal, loaded: Int, deadline: Double) throws -> PrefetchFrame {
         var frame = try prefetchFrame()
         var travelled = 0
         var lastProgress = clock()
         var top = WeChatHistoryTopProbe()
         while goal.needsMore(loadedSlots: max(loaded, travelled)) {
             try verifyChat()
-            if let deadline, clock() >= deadline { prefetchExit = "warmupBudget"; break }
+            if clock() >= deadline { prefetchExit = "warmupBudget"; break }
             guard clock() - lastProgress < WeChatScrollPacing.maximumStallSeconds else {
                 prefetchExit = "scrollStalled"
-                throw WeChatAutomationError.scrollStalled
+                break
             }
             progress(L10n.text("正在预加载聊天历史…"))
             let tallest = frame.rows.map(\.rect.height).max() ?? frame.list.rect.height
@@ -2582,11 +2636,13 @@ final class WeChatAccessibility {
         progress(L10n.text("正在打开微信群聊…"))
         try openChat()
         let selfSender = identifySelf ? try currentAccountNickname() : nil
-        // Plan once, outside the batch loop. Unlimited means warm to the
-        // client-visible start; incremental never warms past its 40-batch bound.
+        // Plan once, outside the batch loop. Ordinary long exports warm only
+        // a bounded initial window, so a multi-year chat can start producing
+        // native ZIPs without first materialising its entire client history.
+        // Incremental runs remain bounded by their existing 40-batch overlap.
         let latestPage: Page?
         if let goal = WeChatPrefetchPlan.goal(requestedMessages: range.value, incremental: checkpoint != nil) {
-            latestPage = try prefetchHistory(goal: goal)
+            latestPage = try bestEffortPrefetch(goal: goal)
         } else { latestPage = nil }
         var directories: [URL] = []
         var batchMessageCounts: [Int] = []

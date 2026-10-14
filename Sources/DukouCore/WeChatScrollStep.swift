@@ -4,11 +4,10 @@ import Foundation
 /// How far one coarse navigation scroll may travel through WeChat's message
 /// list while `WeChatViewport.advance` can still stitch the two snapshots.
 ///
-/// The tracker matches the rows a snapshot shares with the one before it and
-/// needs only one of them, so the content may move by the whole visible list
-/// except a band the height of the tallest row on screen: whatever sat in that
-/// band stays in view. On an ordinary text conversation that is about twice the
-/// step this used to take, which is where the wait for a hundred messages went.
+/// Measured navigation travels about 70% of a screen, leaving at least 30%
+/// overlap. Tall rows can reduce that reach; the existing third-screen
+/// fallback remains for a bubble taller than the viewport. Overlap must still
+/// be verified by the tracker before a selection can be committed.
 ///
 /// The step is expressed in scroll-event units, not pixels: `gain` is how many
 /// points of content one unit moved on the previous step, measured rather than
@@ -22,7 +21,7 @@ public enum WeChatScrollStep {
         guard listHeight > 0 else { return 0 }
         guard gainMeasured else { return careful(listHeight: listHeight) }
         let overlapBand = max(0, tallestRow) + 24
-        return max(listHeight / 3, listHeight - overlapBand) * CGFloat(max(0.1, min(1, reachFactor)))
+        return min(listHeight * 0.7, max(listHeight / 3, listHeight - overlapBand)) * CGFloat(max(0.1, min(1, reachFactor)))
     }
 
     /// The largest single gesture WeChat honours.
@@ -72,9 +71,9 @@ public enum WeChatScrollStep {
     }
 
     /// The scroll units that travel `reach`, bounded so one step can neither
-    /// stall nor trip WeChat's clamp. `ceiling` is the run's own limit, halved
-    /// each time a gesture is clamped, so raising the shared maximum cannot
-    /// strand a conversation whose threshold is lower than this one's.
+    /// stall nor trip WeChat's clamp. `ceiling` is temporarily reduced by
+    /// WeChatScrollPacing while loading; its pre-load value is restored after
+    /// recovery or at the end of that interval.
     public static func delta(reach: CGFloat, gain: Double, ceiling: Int32 = maximumDelta) -> Int32 {
         guard reach.isFinite, reach > 0 else { return 10 }
         let units = Int((reach / CGFloat(max(0.5, gain))).rounded())

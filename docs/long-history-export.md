@@ -99,3 +99,8 @@
 - 只有入群提示的顶部、只有 1 条真实消息、条数刚好是 100 的整数倍。这三项已有历史边界修复，新的滚动节奏不能让它们退回。
 - 导出过程中微信主线程变忙时，采集应在超时后停下并留下已导出的 ZIP，而不是一直空转。
 - 验收时看 `~/Library/Logs/xiaoai-archive/WeChat/latest.json` 的 `recoveryAttempts`、`scrollsByPhase`、`steps` 和 `boundaryStopped`。不要把群名或消息正文写进提交。
+
+
+## 后续实现
+
+从本说明的 `3f24a24` 基线建立修复分支。实现与可复现检查见 [长历史滚动节奏核验记录](long-history-scroll-pacing.md)。上面的真实微信验收项仍需在本机逐项确认，不能用纯策略测试或编译结果替代。
